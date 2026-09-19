@@ -35,6 +35,7 @@ export default function ActivityOverview() {
         <div className="space-y-4">
           {activityCounts.map((item: any) => {
             const activity = ACTIVITIES[item.activity as keyof typeof ACTIVITIES];
+            if (!activity) return null;
             return (
               <div 
                 key={item.activity}

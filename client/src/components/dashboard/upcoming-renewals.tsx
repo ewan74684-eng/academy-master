@@ -51,7 +51,7 @@ export default function UpcomingRenewals() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold text-gray-900 truncate">{player.fullName}</p>
-                    <p className="text-xs text-gray-500">{activity.emoji} {activity.label}</p>
+                    <p className="text-xs text-gray-500">{activity ? `${activity.emoji} ${activity.label}` : player.activity || 'No Activity'}</p>
                   </div>
                   <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 shrink-0">
                     Due
@@ -99,7 +99,7 @@ export default function UpcomingRenewals() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                        {activity.emoji} {activity.label}
+                        {activity ? `${activity.emoji} ${activity.label}` : player.activity || 'No Activity'}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">

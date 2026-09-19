@@ -1346,6 +1346,9 @@ export class DatabaseStorage implements IStorage {
 
     return upcomingRenewals.map((record: any) => ({
       ...record,
+      activity: record.subscription.activity,
+      renewalDate: record.subscription.endDate,
+      subscriptionStatus: record.subscription.status,
       sessionsLeft: Math.max(0, record.subscription.sessionsAllowed - record.subscription.sessionsUsed)
     }));
   }
