@@ -184,7 +184,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (!validateFileSignatureFromBuffer(file.buffer)) {
           return res.status(400).json({ message: "Invalid ID document file signature. File is potentially malicious." });
         }
-        const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/documents' });
+        const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/documents', resourceType: file.mimetype === 'application/pdf' ? 'raw' : 'image' });
         documents.push({
           documentType: 'id',
           fileName: file.originalname,
@@ -199,7 +199,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (!validateFileSignatureFromBuffer(file.buffer)) {
           return res.status(400).json({ message: "Invalid medical form file signature. File is potentially malicious." });
         }
-        const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/documents' });
+        const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/documents', resourceType: file.mimetype === 'application/pdf' ? 'raw' : 'image' });
         documents.push({
           documentType: 'medical_form',
           fileName: file.originalname,
@@ -688,7 +688,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
          return res.status(400).json({ message: "Invalid file signature. File is potentially malicious." });
       }
 
-      const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/documents' });
+      const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/documents', resourceType: file.mimetype === 'application/pdf' ? 'raw' : 'image' });
 
       const document = await storage.createPlayerDocument({
         playerId,
