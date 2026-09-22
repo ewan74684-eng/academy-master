@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useId, useRef, useState } from 'react';
 import { Upload, File, X } from 'lucide-react';
 import { Button } from './button';
 
@@ -17,6 +17,9 @@ export default function FileUpload({
 }: FileUploadProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // Each instance needs its own input, otherwise every drop zone opens the first one on the page
+  const inputId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = useCallback((file: File) => {
     if (file.size > maxSize) {
@@ -53,6 +56,8 @@ export default function FileUpload({
     if (files.length > 0) {
       handleFileSelect(files[0]);
     }
+    // Reset so selecting the same file again still fires onChange
+    e.target.value = '';
   }, [handleFileSelect]);
 
   const removeFile = useCallback(() => {
@@ -100,7 +105,7 @@ export default function FileUpload({
       onDrop={handleDrop}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
-      onClick={() => document.getElementById('file-input')?.click()}
+      onClick={() => inputRef.current?.click()}
     >
       <Upload className="h-8 w-8 text-gray-400 mx-auto mb-2" />
       <p className="text-sm text-gray-600">Click to upload or drag and drop</p>
@@ -109,7 +114,8 @@ export default function FileUpload({
       </p>
       
       <input
-        id="file-input"
+        id={inputId}
+        ref={inputRef}
         type="file"
         accept={accept}
         onChange={handleInputChange}

@@ -1,4 +1,6 @@
+import 'dotenv/config';
 import { v2 as cloudinary } from 'cloudinary';
+import crypto from 'crypto';
 
 // Configure Cloudinary from environment variables
 cloudinary.config({
@@ -28,6 +30,10 @@ export async function uploadToCloudinary(
     };
     if (publicId) {
       uploadOptions.public_id = publicId;
+    } else if (resourceType === 'raw') {
+      // Raw files (PDFs) keep the extension only if it is part of the public_id;
+      // without it the delivered URL has no .pdf and browsers can't open it.
+      uploadOptions.public_id = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.pdf`;
     }
 
     const stream = cloudinary.uploader.upload_stream(
@@ -71,8 +77,13 @@ export async function deleteFromCloudinary(publicId: string, resourceType: strin
  */
 export function extractPublicId(url: string): string | null {
   try {
+    // Raw resources keep the extension in their public_id; images do not
+    if (url.includes('/raw/upload/')) {
+      const match = url.match(/\/upload\/(?:v\d+\/)?(.+)$/);
+      return match ? match[1] : null;
+    }
     // Match the path after /upload/v<digits>/
-    const match = url.match(/\/upload\/v\d+\/(.+?)(?:\.\w+)?$/);
+    const match = url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.\w+)?$/);
     return match ? match[1] : null;
   } catch {
     return null;
