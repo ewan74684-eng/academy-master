@@ -2,6 +2,7 @@ import jsPDF from 'jspdf';
 import type { Player, Payment } from '@shared/schema';
 import { ACTIVITIES, PAYMENT_METHODS } from './constants';
 import { LOGO_BASE64 } from './logo-base64';
+import { TRAINER_ROLE_DISPLAY } from '@shared/schema';
 
 // Shared logo header helper — draws the logo + academy name at the top of every PDF
 function drawLogoHeader(pdf: jsPDF, subtitle: string) {
@@ -359,7 +360,7 @@ export function generateTrainerReceipt(trainer: any, payment: any, advances: any
   pdf.setTextColor(55, 65, 81);
   pdf.text(`Activity:`, 20, startY + 20);
   pdf.setTextColor(0, 0, 0);
-  const activityLabel = ACTIVITIES[trainer.activity as keyof typeof ACTIVITIES]?.label || trainer.activity;
+  const activityLabel = TRAINER_ROLE_DISPLAY[trainer.activity as keyof typeof TRAINER_ROLE_DISPLAY]?.label || trainer.activity;
   pdf.text(activityLabel, 60, startY + 20);
 
   pdf.setTextColor(55, 65, 81);

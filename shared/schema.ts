@@ -39,6 +39,11 @@ export const ACTIVITY_VALUES = [
   'muay_thai', 'special_needs', 'aqua_aerobics', 'basketball', 'volleyball'
 ] as const;
 
+// Non-coaching staff paid through the trainers/payroll section (not offered to players)
+export const STAFF_ROLE_VALUES = ['cleaning', 'reception'] as const;
+
+export const TRAINER_ROLE_VALUES = [...ACTIVITY_VALUES, ...STAFF_ROLE_VALUES] as const;
+
 export const PAYMENT_METHOD_VALUES = [
   'cash', 'visa', 'bank_transfer'
 ] as const;
@@ -63,7 +68,8 @@ export const ATTENDANCE_STATUS_VALUES = [
 export const EXPENSE_CATEGORY_VALUES = [
   'rent', 'utilities', 'maintenance', 'equipment', 'salary', 'marketing', 'transportation', 'other',
   // Added categories
-  'water', 'electricity', 'license_fees', 'residency_fees', 'sewage'
+  'water', 'electricity', 'license_fees', 'residency_fees', 'sewage',
+  'internet', 'cleaning_supplies', 'pool_sanitization'
 ] as const;
 
 export const INVENTORY_STATUS_VALUES = [
@@ -303,7 +309,7 @@ export const TRAINER_ADVANCE_STATUS_VALUES = ['pending', 'deducted', 'repaid'] a
 export const trainers = mysqlTable("trainers", {
   id: varchar("id", { length: 36 }).primaryKey().$defaultFn(() => crypto.randomUUID()),
   name: text("name").notNull(),
-  activity: mysqlEnum("activity", ACTIVITY_VALUES).notNull(),
+  activity: mysqlEnum("activity", TRAINER_ROLE_VALUES).notNull(),
   baseSalary: decimal("base_salary", { precision: 10, scale: 2 }).notNull().default('0'),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
@@ -666,3 +672,11 @@ export const ACTIVITY_DISPLAY = {
   basketball: { emoji: '🏀', label: 'Basketball' },
   volleyball: { emoji: '🏐', label: 'Volleyball' },
 } as const;
+
+export const STAFF_ROLE_DISPLAY = {
+  cleaning: { emoji: '🧹', label: 'Cleaning Worker' },
+  reception: { emoji: '🛎️', label: 'Receptionist' },
+} as const;
+
+// Everything a trainer/staff member can be assigned to
+export const TRAINER_ROLE_DISPLAY = { ...ACTIVITY_DISPLAY, ...STAFF_ROLE_DISPLAY } as const;

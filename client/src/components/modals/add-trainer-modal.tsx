@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { ACTIVITY_DISPLAY } from "@shared/schema";
+import { TRAINER_ROLE_DISPLAY } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 
 interface Trainer {
@@ -99,7 +99,7 @@ export default function AddTrainerModal({ open, onOpenChange, trainer }: Props) 
                 <SelectValue placeholder="Select activity…" />
               </SelectTrigger>
               <SelectContent>
-                {Object.entries(ACTIVITY_DISPLAY).map(([key, val]) => (
+                {Object.entries(TRAINER_ROLE_DISPLAY).map(([key, val]) => (
                   <SelectItem key={key} value={key}>
                     {val.emoji} {val.label}
                   </SelectItem>

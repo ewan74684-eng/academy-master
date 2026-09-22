@@ -26,7 +26,7 @@ import {
   RotateCcw
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { ACTIVITY_DISPLAY } from "@shared/schema";
+import { TRAINER_ROLE_DISPLAY } from "@shared/schema";
 import { apiRequest } from "@/lib/queryClient";
 import AddTrainerModal from "@/components/modals/add-trainer-modal";
 import AddSalaryPaymentModal from "@/components/modals/add-salary-payment-modal";
@@ -152,7 +152,7 @@ function TrainerCard({
     },
   });
 
-  const activity = ACTIVITY_DISPLAY[trainer.activity as keyof typeof ACTIVITY_DISPLAY];
+  const activity = TRAINER_ROLE_DISPLAY[trainer.activity as keyof typeof TRAINER_ROLE_DISPLAY];
 
   // Status Colors
   const statusColors = {
