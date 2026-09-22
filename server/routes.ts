@@ -8,7 +8,7 @@ import { z } from "zod";
 import multer from "multer";
 import path from "path";
 import { requireRole } from "./auth";
-import { uploadToCloudinary, deleteFromCloudinary, extractPublicId } from "./cloudinary";
+import { uploadToCloudinary, deleteFromCloudinary, extractPublicId, getSignedDownloadUrl } from "./cloudinary";
 // Rate limiting definitions moved to index.ts
 
 // File signature validation (Magic Bytes) — works on Buffer directly
@@ -703,6 +703,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error uploading document:", error);
       res.status(400).json({ message: error instanceof Error ? error.message : "Failed to upload document" });
+    }
+  });
+
+  // Stream a document through the server so PDFs open even if Cloudinary blocks public PDF delivery
+  app.get("/api/players/documents/:documentId/file", async (req, res) => {
+    try {
+      const document = await storage.getPlayerDocument(req.params.documentId);
+      if (!document) {
+        return res.status(404).json({ message: "Document not found" });
+      }
+
+      let upstream = await fetch(document.filePath);
+      if (!upstream.ok) {
+        const signedUrl = getSignedDownloadUrl(document.filePath);
+        if (signedUrl) upstream = await fetch(signedUrl);
+      }
+      if (!upstream.ok) {
+        console.error("Cloudinary fetch failed:", upstream.status, upstream.headers.get("x-cld-error"));
+        return res.status(502).json({ message: "Could not load document from storage" });
+      }
+
+      const disposition = req.query.download ? "attachment" : "inline";
+      res.setHeader("Content-Type", document.mimeType || "application/octet-stream");
+      res.setHeader("Content-Disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(document.fileName)}`);
+      res.send(Buffer.from(await upstream.arrayBuffer()));
+    } catch (error) {
+      console.error("Error serving document:", error);
+      res.status(500).json({ message: "Failed to load document" });
     }
   });
 

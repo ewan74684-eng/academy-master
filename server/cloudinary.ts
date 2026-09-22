@@ -90,4 +90,20 @@ export function extractPublicId(url: string): string | null {
   }
 }
 
+/**
+ * Build a signed API download URL for an uploaded asset. Unlike the public CDN URL,
+ * this works even when the account blocks public PDF delivery.
+ */
+export function getSignedDownloadUrl(url: string): string | null {
+  const publicId = extractPublicId(url);
+  if (!publicId) return null;
+  const isRaw = url.includes('/raw/upload/');
+  const ext = isRaw ? '' : (url.match(/\.(\w+)$/)?.[1] ?? '');
+  return cloudinary.utils.private_download_url(publicId, ext, {
+    resource_type: isRaw ? 'raw' : 'image',
+    type: 'upload',
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+  });
+}
+
 export { cloudinary };

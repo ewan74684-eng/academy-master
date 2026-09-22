@@ -156,12 +156,12 @@ export default function DocumentManager({
   }, [handleFileSelect]);
 
   const handleViewDocument = (document: Document) => {
-    window.open(document.filePath, '_blank');
+    window.open(`/api/players/documents/${document.id}/file`, '_blank');
   };
 
   const handleDownloadDocument = (document: Document) => {
     const link = window.document.createElement('a');
-    link.href = document.filePath;
+    link.href = `/api/players/documents/${document.id}/file?download=1`;
     link.download = document.fileName;
     link.click();
   };
