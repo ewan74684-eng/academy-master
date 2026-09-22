@@ -55,7 +55,7 @@ export default function AddTrainerModal({ open, onOpenChange, trainer }: Props) 
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/trainers"] });
-      toast({ title: isEdit ? "Trainer updated" : "Trainer added", description: name });
+      toast({ title: isEdit ? "Employee updated" : "Employee added", description: name });
       onOpenChange(false);
     },
     onError: (err: any) => {
@@ -74,7 +74,7 @@ export default function AddTrainerModal({ open, onOpenChange, trainer }: Props) 
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="text-xl font-bold">
-            {isEdit ? "Edit Trainer" : "Add New Trainer"}
+            {isEdit ? "Edit Employee" : "Add New Employee"}
           </DialogTitle>
         </DialogHeader>
 
@@ -93,10 +93,10 @@ export default function AddTrainerModal({ open, onOpenChange, trainer }: Props) 
 
           {/* Activity */}
           <div className="space-y-1.5">
-            <Label htmlFor="trainer-activity">Activity</Label>
+            <Label htmlFor="trainer-activity">Role</Label>
             <Select value={activity} onValueChange={setActivity} required>
               <SelectTrigger id="trainer-activity">
-                <SelectValue placeholder="Select activity…" />
+                <SelectValue placeholder="Select role…" />
               </SelectTrigger>
               <SelectContent>
                 {Object.entries(TRAINER_ROLE_DISPLAY).map(([key, val]) => (
@@ -132,7 +132,7 @@ export default function AddTrainerModal({ open, onOpenChange, trainer }: Props) 
               className="flex-1 bg-blue-600 hover:bg-blue-700 text-white"
               disabled={mutation.isPending}
             >
-              {mutation.isPending ? "Saving…" : isEdit ? "Save Changes" : "Add Trainer"}
+              {mutation.isPending ? "Saving…" : isEdit ? "Save Changes" : "Add Employee"}
             </Button>
           </div>
         </form>

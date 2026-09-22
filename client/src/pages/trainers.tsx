@@ -314,7 +314,7 @@ function TrainerCard({
                               className="h-6 w-6 p-0 text-gray-400 hover:text-purple-600 ml-1"
                               title="Mark as Repaid (Cash)"
                               onClick={() => {
-                                if (confirm("Mark this advance as repaid in cash by the trainer? This will remove it from pending deductions.")) {
+                                if (confirm("Mark this advance as repaid in cash by the employee? This will remove it from pending deductions.")) {
                                   repayMutation.mutate(adv.id);
                                 }
                               }}
@@ -500,7 +500,7 @@ export default function Trainers() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/trainers"] });
-      toast({ title: "Trainer deleted" });
+      toast({ title: "Employee deleted" });
     },
     onError: (err: any) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -508,7 +508,7 @@ export default function Trainers() {
   });
 
   const confirmDelete = (trainer: Trainer) => {
-    if (window.confirm(`Delete trainer "${trainer.name}"? This will also remove all their records.`)) {
+    if (window.confirm(`Delete employee "${trainer.name}"? This will also remove all their records.`)) {
       deleteMutation.mutate(trainer.id);
     }
   };
@@ -529,7 +529,7 @@ export default function Trainers() {
             <GraduationCap className="h-6 w-6 sm:h-7 sm:w-7 text-blue-600 shrink-0" />
             <div>
               <h2 className="text-xl sm:text-2xl font-bold text-gray-900">Payroll Engine</h2>
-              <p className="text-xs sm:text-sm text-gray-500">Trainers Salary & Adjustments</p>
+              <p className="text-xs sm:text-sm text-gray-500">Employees Salary & Adjustments</p>
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-4">
@@ -547,7 +547,7 @@ export default function Trainers() {
               className="bg-blue-600 hover:bg-blue-700 text-white shrink-0"
             >
               <Plus className="h-4 w-4 sm:mr-2" />
-              <span className="hidden sm:inline">Add Trainer</span>
+              <span className="hidden sm:inline">Add Employee</span>
             </Button>
           </div>
         </div>
@@ -559,7 +559,7 @@ export default function Trainers() {
           <TabsList className="mb-6">
             <TabsTrigger value="trainers">
               <GraduationCap className="h-4 w-4 mr-2" />
-              Trainers ({trainers.length})
+              Employees ({trainers.length})
             </TabsTrigger>
             <TabsTrigger value="transactions">
               <TrendingDown className="h-4 w-4 mr-2" />
@@ -570,12 +570,12 @@ export default function Trainers() {
           {/* ─── Tab 1: Trainer list ─── */}
           <TabsContent value="trainers">
             {isLoading ? (
-              <div className="text-center py-20 text-gray-500">Loading trainers…</div>
+              <div className="text-center py-20 text-gray-500">Loading employees…</div>
             ) : trainers.length === 0 ? (
               <div className="text-center py-20">
                 <GraduationCap className="h-12 w-12 text-gray-300 mx-auto mb-3" />
-                <p className="text-gray-500 text-lg font-medium">No trainers yet</p>
-                <p className="text-gray-400 text-sm mt-1">Click "Add Trainer" to get started.</p>
+                <p className="text-gray-500 text-lg font-medium">No employees yet</p>
+                <p className="text-gray-400 text-sm mt-1">Click "Add Employee" to get started.</p>
               </div>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -604,10 +604,10 @@ export default function Trainers() {
             <div className="flex flex-col sm:flex-row flex-wrap gap-3 mb-6">
               <Select value={filterTrainer} onValueChange={setFilterTrainer}>
                 <SelectTrigger className="w-full sm:w-48 bg-white">
-                  <SelectValue placeholder="Filter by trainer…" />
+                  <SelectValue placeholder="Filter by employee…" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All Trainers</SelectItem>
+                  <SelectItem value="all">All Employees</SelectItem>
                   {trainers.map((t) => (
                     <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
                   ))}
@@ -634,7 +634,7 @@ export default function Trainers() {
                   <thead>
                     <tr className="bg-gray-50 border-b">
                       <th className="text-left py-3 px-4 font-semibold text-gray-600">Date</th>
-                      <th className="text-left py-3 px-4 font-semibold text-gray-600">Trainer</th>
+                      <th className="text-left py-3 px-4 font-semibold text-gray-600">Employee</th>
                       <th className="text-left py-3 px-4 font-semibold text-gray-600">Type</th>
                       <th className="text-right py-3 px-4 font-semibold text-gray-600">Amount (AED)</th>
                       <th className="text-left py-3 px-4 font-semibold text-gray-600">Status / Period</th>

@@ -20,7 +20,7 @@ const navigation = [
   { name: "Players", href: "/players", icon: Users },
   { name: "Payments", href: "/payments", icon: CreditCard },
   { name: "Sessions", href: "/sessions", icon: CalendarCheck },
-  { name: "Trainers", href: "/trainers", icon: GraduationCap },
+  { name: "Employees", href: "/trainers", icon: GraduationCap },
   { name: "Expenses", href: "/expenses", icon: Wallet },
   { name: "Inventory", href: "/inventory", icon: Package },
 ];

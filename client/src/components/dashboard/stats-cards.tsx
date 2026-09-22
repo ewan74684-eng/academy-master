@@ -106,7 +106,7 @@ export default function StatsCards() {
         <StatCard
           title="Outstanding Salaries"
           value={fmt(s?.outstandingSalaries)}
-          sub="Net payable to trainers"
+          sub="Net payable to employees"
           icon={Clock}
           iconBg="bg-indigo-100"
           iconColor="text-indigo-600"

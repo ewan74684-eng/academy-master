@@ -71,7 +71,7 @@ export default function AddBonusModal({ open, onOpenChange, trainer, currentMont
         <form onSubmit={handleSubmit} className="space-y-4 pt-4">
           {trainer && (
             <div className="bg-emerald-50 rounded p-3 text-sm border border-emerald-100">
-              <span className="font-medium">Trainer:</span> {trainer.name}
+              <span className="font-medium">Employee:</span> {trainer.name}
             </div>
           )}
 

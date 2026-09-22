@@ -27,7 +27,7 @@ export default function TrainerReceiptModal({
   
   const handlePrint = () => {
     printElementById("receipt-content", {
-      title: `Trainer Receipt ${payment?.month ?? ""}`.trim(),
+      title: `Employee Receipt ${payment?.month ?? ""}`.trim(),
       styles: "body { max-width: 480px; margin: 0 auto; }",
     });
   };
@@ -48,7 +48,7 @@ export default function TrainerReceiptModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Trainer Salary Receipt</DialogTitle>
+          <DialogTitle>Employee Salary Receipt</DialogTitle>
           <DialogDescription>
             Download or print salary receipt for {trainer.name}
           </DialogDescription>
@@ -68,7 +68,7 @@ export default function TrainerReceiptModal({
                 <p className="text-sm text-academy-red font-medium">Champions Academy</p>
               </div>
             </div>
-            <p className="text-sm text-gray-600">Trainer Salary Receipt</p>
+            <p className="text-sm text-gray-600">Employee Salary Receipt</p>
           </div>
 
           {/* Receipt Details */}
@@ -78,7 +78,7 @@ export default function TrainerReceiptModal({
               <span className="text-sm font-medium">{payment.id.slice(0, 8).toUpperCase()}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-sm text-gray-600">Trainer:</span>
+              <span className="text-sm text-gray-600">Employee:</span>
               <span className="text-sm font-medium">{trainer.name}</span>
             </div>
             <div className="flex justify-between">

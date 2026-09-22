@@ -253,7 +253,7 @@ export default function AddSalaryPaymentModal({ open, onOpenChange, trainer, cur
                 </div>
                 {paid > 0 && (
                   <div className="flex justify-between text-emerald-600">
-                    <span>Cash to Hand Trainer</span>
+                    <span>Cash to Hand Employee</span>
                     <span>− AED {paid.toLocaleString()}</span>
                   </div>
                 )}

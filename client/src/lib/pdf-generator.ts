@@ -62,7 +62,7 @@ export function generateReceipt(player: Player, payment: Payment, allPayments?: 
 
   const activity = ACTIVITIES[(player as any).activity as keyof typeof ACTIVITIES];
   pdf.setTextColor(55, 65, 81);
-  pdf.text(`Activity:`, 20, startY + 20);
+  pdf.text(`Role:`, 20, startY + 20);
   pdf.setTextColor(0, 0, 0);
   pdf.text(`${activity?.label || (player as any).activity}`, 60, startY + 20);
 
@@ -186,7 +186,7 @@ export function generatePlayerProfile(player: Player, payments: Payment[], sessi
 
   const activity = ACTIVITIES[(player as any).activity as keyof typeof ACTIVITIES];
   pdf.setTextColor(0, 0, 0);
-  pdf.text(`Activity:`, 25, startY + 42);
+  pdf.text(`Role:`, 25, startY + 42);
   pdf.setTextColor(55, 65, 81);
   pdf.text(`${activity?.label || (player as any).activity}`, 70, startY + 42);
 
@@ -341,7 +341,7 @@ export function generateAllPlayersPDF(players: Player[]) {
 export function generateTrainerReceipt(trainer: any, payment: any, advances: any[]) {
   const pdf = new jsPDF();
 
-  drawLogoHeader(pdf, 'Trainer Salary Receipt');
+  drawLogoHeader(pdf, 'Employee Salary Receipt');
 
   const startY = 48;
 
@@ -353,12 +353,12 @@ export function generateTrainerReceipt(trainer: any, payment: any, advances: any
   pdf.text(payment.id.slice(0, 8).toUpperCase(), 60, startY);
 
   pdf.setTextColor(55, 65, 81);
-  pdf.text(`Trainer:`, 20, startY + 10);
+  pdf.text(`Employee:`, 20, startY + 10);
   pdf.setTextColor(0, 0, 0);
   pdf.text(trainer.name, 60, startY + 10);
 
   pdf.setTextColor(55, 65, 81);
-  pdf.text(`Activity:`, 20, startY + 20);
+  pdf.text(`Role:`, 20, startY + 20);
   pdf.setTextColor(0, 0, 0);
   const activityLabel = TRAINER_ROLE_DISPLAY[trainer.activity as keyof typeof TRAINER_ROLE_DISPLAY]?.label || trainer.activity;
   pdf.text(activityLabel, 60, startY + 20);
