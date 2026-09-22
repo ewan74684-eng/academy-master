@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, ALLOWED_REFUND_METHODS } from "./storage";
-import { insertPlayerSchema, insertPaymentSchema, insertSessionSchema, subscriptions } from "@shared/schema";
+import { insertPlayerSchema, insertPaymentSchema, insertSessionSchema, subscriptions, ACTIVITY_VALUES, SUBSCRIPTION_STATUS_VALUES, PAYMENT_METHOD_VALUES, TRAINER_ROLE_VALUES, EXPENSE_CATEGORY_VALUES, ATTENDANCE_STATUS_VALUES, EXPENSE_STATUS_VALUES, INVENTORY_TRANSACTION_TYPE_VALUES } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, desc } from "drizzle-orm";
 import { z } from "zod";
@@ -9,6 +9,7 @@ import multer from "multer";
 import path from "path";
 import { requireRole } from "./auth";
 import { uploadToCloudinary, deleteFromCloudinary, extractPublicId, getSignedDownloadUrl } from "./cloudinary";
+import { ValidationError, safeErrorMessage, parseAmount, parseNonNegativeInt, parseDate, parseMonth, parseEnum, parseText } from "./validation";
 // Rate limiting definitions moved to index.ts
 
 // File signature validation (Magic Bytes) — works on Buffer directly
@@ -24,6 +25,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB limit
+    files: 2, // no endpoint takes more than two files; stops memory abuse via many large files
   },
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|pdf/;
@@ -250,7 +252,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json(player);
     } catch (error) {
       console.error("Error creating player:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create player" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to create player") });
     }
   });
 
@@ -259,6 +261,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const currentPlayer = await storage.getPlayer(req.params.id);
       if (!currentPlayer) {
         return res.status(404).json({ message: "Player not found" });
+      }
+
+      // Validate subscription-related fields up front so nothing is written if any are invalid
+      if (req.body.dateOfBirth) parseDate(req.body.dateOfBirth, "dateOfBirth");
+      if (req.body.subscriptionDate) parseDate(req.body.subscriptionDate, "subscriptionDate");
+      if (req.body.subscriptionEndDate) parseDate(req.body.subscriptionEndDate, "subscriptionEndDate");
+      if (req.body.subscriptionDate && req.body.subscriptionEndDate &&
+          new Date(req.body.subscriptionEndDate) <= new Date(req.body.subscriptionDate)) {
+        throw new ValidationError("Subscription end date must be after the start date");
+      }
+      if (req.body.activity) parseEnum(req.body.activity, ACTIVITY_VALUES, "activity");
+      if (req.body.subscriptionStatus) parseEnum(req.body.subscriptionStatus, SUBSCRIPTION_STATUS_VALUES, "subscriptionStatus");
+      if (req.body.totalSessionsAllowed !== undefined && req.body.totalSessionsAllowed !== null && req.body.totalSessionsAllowed !== '') {
+        parseNonNegativeInt(req.body.totalSessionsAllowed, "totalSessionsAllowed");
+      }
+      if (req.body.monthlySubscriptionFee !== undefined && req.body.monthlySubscriptionFee !== null && req.body.monthlySubscriptionFee !== '') {
+        parseAmount(req.body.monthlySubscriptionFee, "monthlySubscriptionFee");
+      }
+      if (req.body.discountPercentage !== undefined && req.body.discountPercentage !== null && req.body.discountPercentage !== '') {
+        const pct = parseAmount(req.body.discountPercentage, "discountPercentage")!;
+        if (pct > 100) throw new ValidationError("discountPercentage cannot exceed 100");
       }
 
       // Convert date strings to Date objects and calculate renewal date if subscription date is provided
@@ -329,7 +352,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(player);
     } catch (error) {
       console.error("Error updating player:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to update player" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to update player") });
     }
   });
 
@@ -362,8 +385,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const currentFee = activeSub?.price || '200';
       
       // Use provided dates or calculate new dates
-      const newSubscriptionDate = subscriptionStartDate ? new Date(subscriptionStartDate) : new Date();
-      const newRenewalDate = subscriptionEndDate ? new Date(subscriptionEndDate) : (() => {
+      const newSubscriptionDate = subscriptionStartDate ? parseDate(subscriptionStartDate, "subscriptionStartDate") : new Date();
+      const newRenewalDate = subscriptionEndDate ? parseDate(subscriptionEndDate, "subscriptionEndDate") : (() => {
         const calculated = new Date(newSubscriptionDate);
         calculated.setMonth(calculated.getMonth() + 1);
         return calculated;
@@ -384,6 +407,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (paymentAmount > newSubscriptionFee) {
         return res.status(400).json({ message: "Amount paid cannot exceed subscription fee" });
       }
+      if (newRenewalDate <= newSubscriptionDate) {
+        return res.status(400).json({ message: "Subscription end date must be after the start date" });
+      }
+      const newSessionsAllowed = (totalSessionsAllowed !== undefined && totalSessionsAllowed !== null && totalSessionsAllowed !== '')
+        ? parseNonNegativeInt(totalSessionsAllowed, "totalSessionsAllowed")
+        : currentTotalSessions;
+      const renewPaymentMethod = parseEnum(paymentMethod, PAYMENT_METHOD_VALUES, "paymentMethod");
 
       let paymentData: any = undefined;
       if (newSubscriptionFee > 0 && paymentAmount > 0) {
@@ -392,7 +422,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           subscriptionFee: newSubscriptionFee.toString(),
           amountPaid: paymentAmount.toString(),
           remainingBalance: remainingBalance.toString(),
-          paymentMethod: paymentMethod,
+          paymentMethod: renewPaymentMethod,
           description: description || "Payment for new subscription period",
         };
       }
@@ -402,7 +432,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         status: 'active' as const,
         startDate: newSubscriptionDate,
         endDate: newRenewalDate,
-        sessionsAllowed: totalSessionsAllowed || currentTotalSessions,
+        sessionsAllowed: newSessionsAllowed,
         sessionsUsed: 0,
         price: newSubscriptionFee.toString(),
       };
@@ -412,7 +442,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(updatedPlayer);
     } catch (error) {
       console.error("Error renewing player subscription:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to renew subscription" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to renew subscription") });
     }
   });
 
@@ -510,81 +540,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/payments", async (req, res) => {
+  // Both payment endpoints go through storage.recordPlayerPayment, which computes the fee and
+  // balance on the server and locks the player row (client-sent totals/status are ignored).
+  const handleRecordPayment = async (req: any, res: any) => {
     try {
-      const paymentData = insertPaymentSchema.parse(req.body);
-      const payment = await storage.createPayment(paymentData);
-      
-      // Setting player to active status because they made a payment
-      await storage.updatePlayerSubscriptionStatus((paymentData as any).playerId, 'active');
+      const playerId = parseText(req.body.playerId, "playerId", { required: true, max: 36 })!;
+      const amountPaid = parseAmount(req.body.amountPaid, "amountPaid", { allowZero: false })!;
+      const paymentMethod = parseEnum(req.body.paymentMethod ?? 'cash', PAYMENT_METHOD_VALUES, "paymentMethod");
+      const description = parseText(req.body.description, "description", { max: 500 }) || 'Additional subscription payment';
 
+      const payment = await storage.recordPlayerPayment(playerId, amountPaid, paymentMethod, description);
       res.status(201).json(payment);
     } catch (error) {
       console.error("Error creating payment:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create payment" });
+      const msg = safeErrorMessage(error, "Failed to create payment");
+      res.status(msg === 'Player not found' ? 404 : 400).json({ message: msg });
     }
-  });
+  };
 
-  app.post("/api/payments/additional", async (req, res) => {
-    try {
-      const { playerId, amountPaid, paymentMethod, description } = req.body;
-
-      // Get player to access subscription fee
-      const player = await storage.getPlayer(playerId);
-      if (!player) {
-        return res.status(404).json({ message: "Player not found" });
-      }
-
-      // Get all payments for this player to calculate total paid
-      const playerPayments = await storage.getPlayerPayments(playerId);
-      
-      // Use player's monthly subscription fee as the baseline
-      const subscriptionFee = parseFloat((player as any).monthlySubscriptionFee || '0');
-      
-      // Calculate total paid so far
-      const totalPaidSoFar = playerPayments.reduce((sum: number, payment: any) => {
-        return sum + parseFloat(payment.amountPaid);
-      }, 0);
-      
-      const newAmountPaid = parseFloat(amountPaid);
-      if (isNaN(newAmountPaid) || newAmountPaid <= 0) {
-        return res.status(400).json({ message: "Amount paid must be greater than zero" });
-      }
-      
-      const newTotalPaid = totalPaidSoFar + newAmountPaid;
-      const newRemainingBalance = Math.max(0, subscriptionFee - newTotalPaid);
-
-      // Validate that the new payment doesn't exceed subscription fee
-      if (newTotalPaid > subscriptionFee) {
-        return res.status(400).json({ 
-          message: `Payment amount exceeds subscription fee. Maximum payment allowed: AED ${(subscriptionFee - totalPaidSoFar).toFixed(2)}`
-        });
-      }
-
-      // Generate receipt number
-      const receiptNumber = `RCT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-
-      const paymentData = {
-        playerId: playerId,
-        subscriptionFee: subscriptionFee.toString(),
-        amountPaid: newAmountPaid.toString(),
-        remainingBalance: newRemainingBalance.toString(),
-        paymentMethod: paymentMethod,
-        description: description || 'Additional subscription payment',
-        receiptNumber: receiptNumber,
-      };
-
-      const payment = await storage.createPayment(paymentData);
-
-      // Setting player to active status because they made a payment
-      await storage.updatePlayerSubscriptionStatus(playerId, 'active');
-
-      res.status(201).json(payment);
-    } catch (error) {
-      console.error("Error creating additional payment:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create payment" });
-    }
-  });
+  app.post("/api/payments", handleRecordPayment);
+  app.post("/api/payments/additional", handleRecordPayment);
 
   // ─── Payment Refund routes ──────────────────────────────────────────────────
 
@@ -641,7 +616,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json({ refund, payment: updatedPayment, summary });
     } catch (error) {
       console.error("Error creating refund:", error);
-      const msg = error instanceof Error ? error.message : "Failed to process refund";
+      const msg = safeErrorMessage(error, "Failed to process refund");
       const status = msg.includes('not found') ? 404
                    : msg.includes('Cannot refund') || msg.includes('exceeds') ? 422
                    : 400;
@@ -676,7 +651,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/players/:playerId/documents", upload.any(), async (req, res) => {
     try {
       const { playerId } = req.params;
-      const { documentType } = req.body;
+      const documentType = parseEnum(req.body.documentType, ['id', 'medical_form'] as const, "documentType");
       const files = req.files as Express.Multer.File[];
 
       if (!files || files.length === 0) {
@@ -686,6 +661,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const file = files[0];
       if (!validateFileSignatureFromBuffer(file.buffer)) {
          return res.status(400).json({ message: "Invalid file signature. File is potentially malicious." });
+      }
+      if (!(await storage.getPlayer(playerId))) {
+        return res.status(404).json({ message: "Player not found" });
       }
 
       const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/documents', resourceType: file.mimetype === 'application/pdf' ? 'raw' : 'image' });
@@ -702,7 +680,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json(document);
     } catch (error) {
       console.error("Error uploading document:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to upload document" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to upload document") });
     }
   });
 
@@ -781,12 +759,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/sessions", async (req, res) => {
     try {
-      const playerId = req.body.playerId;
+      const playerId = parseText(req.body.playerId, "playerId", { required: true, max: 36 })!;
       let subscriptionId = req.body.subscriptionId;
 
-      if (!subscriptionId) {
+      if (subscriptionId) {
+        // The subscription must belong to this player, otherwise we'd consume another player's sessions
+        const [sub] = await db.select({ id: subscriptions.id }).from(subscriptions)
+          .where(and(eq(subscriptions.id, String(subscriptionId)), eq(subscriptions.playerId, playerId)));
+        if (!sub) {
+          return res.status(400).json({ message: "Subscription does not belong to this player." });
+        }
+      } else {
+        // Use the player's newest active subscription
         const [activeSub] = await db.select().from(subscriptions)
-          .where(and(eq(subscriptions.playerId, playerId), eq(subscriptions.status, 'active')));
+          .where(and(eq(subscriptions.playerId, playerId), eq(subscriptions.status, 'active')))
+          .orderBy(desc(subscriptions.createdAt))
+          .limit(1);
         if (!activeSub) {
           return res.status(400).json({ message: "Player does not have an active subscription." });
         }
@@ -794,8 +782,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Convert date strings to Date objects before validation
-      const scheduledStartTime = new Date(req.body.scheduledStartTime);
-      const scheduledEndTime = new Date(req.body.scheduledEndTime);
+      const scheduledStartTime = parseDate(req.body.scheduledStartTime, "scheduledStartTime");
+      const scheduledEndTime = parseDate(req.body.scheduledEndTime, "scheduledEndTime");
+      if (req.body.attendanceStatus) parseEnum(req.body.attendanceStatus, ATTENDANCE_STATUS_VALUES, "attendanceStatus");
 
       // Validate that the end time is after the start time
       if (scheduledEndTime <= scheduledStartTime) {
@@ -808,7 +797,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const sessionData = {
         playerId,
-        sessionDate: new Date(req.body.sessionDate),
+        sessionDate: parseDate(req.body.sessionDate, "sessionDate"),
         scheduledStartTime,
         scheduledEndTime,
         instructorName: req.body.instructorName || null,
@@ -824,14 +813,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(session);
     } catch (error: any) {
       console.error("Error creating session:", error);
-      res.status(500).json({ message: "Failed to create session" });
+      const msg = safeErrorMessage(error, "Failed to create session");
+      res.status(msg === "Failed to create session" ? 500 : 400).json({ message: msg });
     }
   });
 
   app.post("/api/sessions/:sessionId/attendance", async (req, res) => {
     try {
       const { sessionId } = req.params;
-      const { playerId, status, notes } = req.body;
+      const { status, notes } = req.body;
+      parseEnum(status, ATTENDANCE_STATUS_VALUES, "status");
       
       const session = await storage.markAttendance(sessionId, status, notes);
       if (!session) {
@@ -841,7 +832,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(session);
     } catch (error) {
       console.error("Error marking attendance:", error);
-      res.status(500).json({ message: "Failed to mark attendance" });
+      const msg = safeErrorMessage(error, "Failed to mark attendance");
+      res.status(msg === "Session not found" ? 404 : msg === "Failed to mark attendance" ? 500 : 400).json({ message: msg });
     }
   });
 
@@ -934,7 +926,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(session);
     } catch (error) {
       console.error("Error updating session:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to update session" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to update session") });
     }
   });
 
@@ -952,30 +944,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/trainers", async (req, res) => {
     try {
-      const { name, activity, baseSalary } = req.body;
-      if (!name || !activity || baseSalary === undefined) {
-        return res.status(400).json({ message: "name, activity, and baseSalary are required" });
-      }
-      const trainer = await storage.createTrainer({ name, activity, baseSalary: String(baseSalary) });
+      const name = parseText(req.body.name, "name", { required: true, max: 200 })!;
+      const activity = parseEnum(req.body.activity, TRAINER_ROLE_VALUES, "activity");
+      const baseSalary = parseAmount(req.body.baseSalary, "baseSalary")!;
+      const trainer = await storage.createTrainer({ name, activity, baseSalary: baseSalary.toFixed(2) });
       res.status(201).json(trainer);
     } catch (error) {
       console.error("Error creating trainer:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create trainer" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to create trainer") });
     }
   });
 
   app.put("/api/trainers/:id", async (req, res) => {
     try {
       const update: any = {};
-      if (req.body.name !== undefined) update.name = req.body.name;
-      if (req.body.activity !== undefined) update.activity = req.body.activity;
-      if (req.body.baseSalary !== undefined) update.baseSalary = String(req.body.baseSalary);
+      if (req.body.name !== undefined) update.name = parseText(req.body.name, "name", { required: true, max: 200 });
+      if (req.body.activity !== undefined) update.activity = parseEnum(req.body.activity, TRAINER_ROLE_VALUES, "activity");
+      if (req.body.baseSalary !== undefined) update.baseSalary = parseAmount(req.body.baseSalary, "baseSalary")!.toFixed(2);
+      if (Object.keys(update).length === 0) return res.status(400).json({ message: "Nothing to update" });
       const trainer = await storage.updateTrainer(req.params.id, update);
       if (!trainer) return res.status(404).json({ message: "Trainer not found" });
       res.json(trainer);
     } catch (error) {
       console.error("Error updating trainer:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to update trainer" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to update trainer") });
     }
   });
 
@@ -1004,18 +996,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/trainers/:id/salary-payments", async (req, res) => {
     try {
-      const { amount, month, notes, advanceIdsToDeduct = [] } = req.body;
-      if (!amount || !month) {
-        return res.status(400).json({ message: "amount and month are required" });
-      }
+      const amount = parseAmount(req.body.amount, "amount", { allowZero: false })!;
+      const month = parseMonth(req.body.month);
+      const notes = parseText(req.body.notes, "notes", { max: 1000 });
+      const advanceIdsToDeduct = Array.isArray(req.body.advanceIdsToDeduct)
+        ? req.body.advanceIdsToDeduct.filter((x: unknown) => typeof x === 'string').slice(0, 200)
+        : [];
       const payment = await storage.createTrainerSalaryPayment(
-        { trainerId: req.params.id, amount: String(amount), month, notes: notes || null },
+        { trainerId: req.params.id, amount: amount.toFixed(2), month, notes },
         advanceIdsToDeduct
       );
       res.status(201).json(payment);
     } catch (error) {
       console.error("Error creating salary payment:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create salary payment" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to create salary payment") });
     }
   });
 
@@ -1033,20 +1027,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/trainers/:id/advances", async (req, res) => {
     try {
-      const { amount, notes } = req.body;
-      if (!amount) {
-        return res.status(400).json({ message: "amount is required" });
-      }
+      const amount = parseAmount(req.body.amount, "amount", { allowZero: false })!;
+      const notes = parseText(req.body.notes, "notes", { max: 1000 });
+      if (!(await storage.getTrainer(req.params.id))) return res.status(404).json({ message: "Trainer not found" });
       const advance = await storage.createTrainerAdvance({
         trainerId: req.params.id,
-        amount: String(amount),
-        remainingBalance: String(amount),
-        notes: notes || null,
+        amount: amount.toFixed(2),
+        remainingBalance: amount.toFixed(2),
+        notes,
       });
       res.status(201).json(advance);
     } catch (error) {
       console.error("Error creating advance:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create advance" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to create advance") });
     }
   });
 
@@ -1061,7 +1054,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(advance);
     } catch (error) {
       console.error("Error repaying advance:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to repay advance" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to repay advance") });
     }
   });
 
@@ -1079,48 +1072,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/trainers/:id/bonuses", async (req, res) => {
     try {
-      const { amount, month, note } = req.body;
-      if (!amount || !month) {
-        return res.status(400).json({ message: "amount and month are required" });
-      }
+      const amount = parseAmount(req.body.amount, "amount", { allowZero: false })!;
+      const month = parseMonth(req.body.month);
+      const note = parseText(req.body.note, "note", { max: 1000 });
+      if (!(await storage.getTrainer(req.params.id))) return res.status(404).json({ message: "Trainer not found" });
       const bonus = await storage.createTrainerBonus({
         trainerId: req.params.id,
-        amount: String(amount),
+        amount: amount.toFixed(2),
         month,
-        note: note || null,
+        note,
       });
       res.status(201).json(bonus);
     } catch (error) {
       console.error("Error creating bonus:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create bonus" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to create bonus") });
     }
   });
 
   // Trainer payroll locking
   app.post("/api/trainers/:id/payrolls/lock", async (req, res) => {
     try {
-      const { month } = req.body;
-      if (!month) {
-        return res.status(400).json({ message: "month is required" });
-      }
+      const month = parseMonth(req.body.month);
       const payroll = await storage.lockTrainerPayroll(req.params.id, month);
       res.status(200).json(payroll);
     } catch (error) {
       console.error("Error locking payroll:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to lock payroll" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to lock payroll") });
     }
   });
 
   // Trainer ledger
   app.get("/api/trainers/:id/ledger", async (req, res) => {
     try {
-      const month = (req.query.month as string) || 
-        `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+      const month = req.query.month
+        ? parseMonth(req.query.month)
+        : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
       const ledger = await storage.getTrainerLedger(req.params.id, month);
       res.json(ledger);
     } catch (error) {
       console.error("Error fetching trainer ledger:", error);
-      res.status(500).json({ message: "Failed to fetch trainer ledger" });
+      const msg = safeErrorMessage(error, "Failed to fetch trainer ledger");
+      res.status(msg === "Trainer not found" ? 404 : msg.includes("YYYY-MM") ? 400 : 500).json({ message: msg });
     }
   });
 
@@ -1135,27 +1127,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Only these expense fields may come from the client, each validated.
+  const MANUAL_EXPENSE_CATEGORIES = EXPENSE_CATEGORY_VALUES.filter(c => c !== 'salary');
+  function parseExpenseBody(body: any, partial: boolean) {
+    const out: Record<string, any> = {};
+    if (!partial || body.category !== undefined) out.category = parseEnum(body.category, MANUAL_EXPENSE_CATEGORIES, "category");
+    if (!partial || body.amount !== undefined) out.amount = parseAmount(body.amount, "amount", { allowZero: false })!.toFixed(2);
+    if (body.paymentMethod !== undefined) out.paymentMethod = parseEnum(body.paymentMethod, PAYMENT_METHOD_VALUES, "paymentMethod");
+    if (body.status !== undefined) out.status = parseEnum(body.status, EXPENSE_STATUS_VALUES, "status");
+    if (body.description !== undefined) out.description = parseText(body.description, "description", { max: 1000 });
+    if (body.notes !== undefined) out.notes = parseText(body.notes, "notes", { max: 2000 });
+    return out;
+  }
+
   app.post("/api/expenses", async (req, res) => {
     try {
       const expenseData = {
-        ...req.body,
-        date: req.body.date ? new Date(req.body.date) : new Date(),
+        ...parseExpenseBody(req.body, false),
+        date: req.body.date ? parseDate(req.body.date, "date") : new Date(),
         createdBy: ((req.user as any)?.id === 'admin-id') ? null : (req.user as any)?.id
       };
       const reqContext = { ipAddress: req.ip, userAgent: req.headers['user-agent'] };
-      const created = await storage.createExpense(expenseData, reqContext);
+      const created = await storage.createExpense(expenseData as any, reqContext);
       res.status(201).json(created);
     } catch (error) {
       console.error("Error creating expense:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create expense" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to create expense") });
     }
   });
 
   app.put("/api/expenses/:id", async (req, res) => {
     try {
       const updateData = {
-        ...req.body,
-        date: req.body.date ? new Date(req.body.date) : undefined,
+        ...parseExpenseBody(req.body, true),
+        date: req.body.date ? parseDate(req.body.date, "date") : undefined,
         updatedBy: ((req.user as any)?.id === 'admin-id') ? null : (req.user as any)?.id
       };
       const reqContext = { ipAddress: req.ip, userAgent: req.headers['user-agent'] };
@@ -1166,7 +1171,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(updated);
     } catch (error) {
       console.error("Error updating expense:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to update expense" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to update expense") });
     }
   });
 
@@ -1209,7 +1214,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json(created);
     } catch (error) {
       console.error("Error creating inventory item:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to create inventory item" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to create inventory item") });
     }
   });
 
@@ -1228,7 +1233,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(updated);
     } catch (error) {
       console.error("Error updating inventory item:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to update inventory item" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to update inventory item") });
     }
   });
 
@@ -1261,8 +1266,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/inventory/transactions", async (req, res) => {
     try {
       const { createExpense, expenseCategory, paymentMethod, unitCostAtTransaction, ...restData } = req.body;
+      parseEnum(restData.type, INVENTORY_TRANSACTION_TYPE_VALUES, "type");
+      const quantity = Number(restData.quantity);
+      if (!Number.isInteger(quantity) || Math.abs(quantity) > 1_000_000) {
+        throw new ValidationError("quantity must be a whole number");
+      }
+      if (unitCostAtTransaction !== undefined && unitCostAtTransaction !== null && unitCostAtTransaction !== '') {
+        parseAmount(unitCostAtTransaction, "unitCostAtTransaction");
+      }
+      if (createExpense) {
+        if (expenseCategory) parseEnum(expenseCategory, MANUAL_EXPENSE_CATEGORIES, "expenseCategory");
+        if (paymentMethod) parseEnum(paymentMethod, PAYMENT_METHOD_VALUES, "paymentMethod");
+      }
       const txData = {
-        ...restData,
+        itemId: parseText(restData.itemId, "itemId", { required: true, max: 36 }),
+        type: restData.type,
+        quantity,
+        reference: parseText(restData.reference, "reference", { max: 500 }),
+        notes: parseText(restData.notes, "notes", { max: 2000 }),
         // Carry user-provided unit cost so storage can record it on the transaction
         unitCostAtTransaction: unitCostAtTransaction || null,
         transactionDate: req.body.transactionDate ? new Date(req.body.transactionDate) : new Date(),
@@ -1281,12 +1302,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         userAgent: req.headers['user-agent']
       };
 
-      const created = await storage.createInventoryTransaction(txData, expenseData, reqContext);
+      const created = await storage.createInventoryTransaction(txData as any, expenseData, reqContext);
 
       res.status(201).json(created);
     } catch (error) {
       console.error("Error creating inventory transaction:", error);
-      res.status(400).json({ message: error instanceof Error ? error.message : "Failed to process inventory transaction" });
+      res.status(400).json({ message: safeErrorMessage(error, "Failed to process inventory transaction") });
     }
   });
 
@@ -1300,7 +1321,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!validateFileSignatureFromBuffer(file.buffer)) {
          return res.status(400).json({ message: "Invalid file signature. File is potentially malicious." });
       }
-      const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/receipts' });
+      if (!(await storage.getExpense(req.params.id))) {
+        return res.status(404).json({ message: "Expense not found" });
+      }
+      const uploaded = await uploadToCloudinary(file.buffer, { folder: 'academy-uploads/receipts', resourceType: file.mimetype === 'application/pdf' ? 'raw' : 'image' });
       const receiptUrl = uploaded.url;
       const updated = await storage.updateExpense(req.params.id, { receiptUrl } as any);
       if (!updated) {
@@ -1319,8 +1343,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { entityType, limit, offset } = req.query;
       const result = await storage.getActivityLogs({
         entityType: entityType as string,
-        limit: limit ? parseInt(limit as string) : 50,
-        offset: offset ? parseInt(offset as string) : 0,
+        limit: Math.min(Math.max(parseInt(limit as string) || 50, 1), 200),
+        offset: Math.max(parseInt(offset as string) || 0, 0),
       });
       res.json(result);
     } catch (error) {

@@ -554,7 +554,7 @@ export type Subscription = typeof subscriptions.$inferSelect;
 export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({ id: true, createdAt: true, updatedAt: true })
   .refine(data => parseFloat(data.price as string) >= 0, { message: "Price cannot be negative", path: ["price"] })
   .refine(data => data.sessionsAllowed >= 0, { message: "Sessions allowed cannot be negative", path: ["sessionsAllowed"] })
-  .refine(data => data.sessionsUsed >= 0, { message: "Sessions used cannot be negative", path: ["sessionsUsed"] });
+  .refine(data => (data.sessionsUsed ?? 0) >= 0, { message: "Sessions used cannot be negative", path: ["sessionsUsed"] });
 export type InsertSubscription = Omit<typeof subscriptions.$inferInsert, 'id' | 'createdAt' | 'updatedAt'>;
 
 export type PlayerDocument = typeof playerDocuments.$inferSelect;

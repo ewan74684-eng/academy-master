@@ -28,8 +28,11 @@ export async function hashPassword(password: string) {
 
 async function comparePasswords(supplied: string, stored: string) {
   const [hashed, salt] = stored.split(".");
+  if (!hashed || !salt) return false;
   const hashedBuf = Buffer.from(hashed, "hex");
   const suppliedBuf = (await scryptAsync(supplied, salt, 64)) as Buffer;
+  // timingSafeEqual throws on length mismatch (e.g. a malformed stored hash)
+  if (hashedBuf.length !== suppliedBuf.length) return false;
   return timingSafeEqual(hashedBuf, suppliedBuf);
 }
 
@@ -48,6 +51,7 @@ export async function setupAuth(app: Express) {
   const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
 
   try {
+    if (!ADMIN_USERNAME || !ADMIN_PASSWORD) throw new Error("ADMIN_USERNAME / ADMIN_PASSWORD are not set; skipping admin seed");
     const existingAdmins = await db.select().from(users).where(eq(users.username, ADMIN_USERNAME));
     if (existingAdmins.length === 0) {
       const hashed = await hashPassword(ADMIN_PASSWORD);
@@ -56,6 +60,10 @@ export async function setupAuth(app: Express) {
     }
   } catch (err) {
     console.error("Failed to seed admin user:", err);
+  }
+
+  if (!process.env.SESSION_SECRET) {
+    console.warn("WARNING: SESSION_SECRET is not set — using a built-in default. Set a long random SESSION_SECRET in the environment.");
   }
 
   const sessionSettings: session.SessionOptions = {
@@ -68,6 +76,8 @@ export async function setupAuth(app: Express) {
     cookie: {
       maxAge: 86400000, // 24 hours
       secure: process.env.NODE_ENV === "production",
+      httpOnly: true,
+      sameSite: "lax", // blocks the session cookie on cross-site POSTs (CSRF)
     },
   };
 
@@ -82,6 +92,9 @@ export async function setupAuth(app: Express) {
   passport.use(
     new LocalStrategy(async (username, password, done) => {
       try {
+        if (typeof username !== "string" || typeof password !== "string" || username.length > 255 || password.length > 1024) {
+          return done(null, false, { message: "Invalid username or password" });
+        }
         const [user] = await db.select().from(users).where(eq(users.username, username));
         if (!user || !(await comparePasswords(password, user.password))) {
           return done(null, false, { message: "Invalid username or password" });

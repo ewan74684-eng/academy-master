@@ -150,6 +150,7 @@ export interface IStorage {
   getPayments(): Promise<Payment[]>;
   getPlayerPayments(playerId: string): Promise<Payment[]>;
   createPayment(payment: InsertPayment): Promise<Payment>;
+  recordPlayerPayment(playerId: string, amountPaid: number, paymentMethod: string, description: string | null): Promise<Payment>;
   updatePayment(id: string, payment: Partial<InsertPayment>): Promise<Payment | undefined>;
 
   // Payment Refunds
@@ -476,9 +477,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updatePlayerSubscriptionStatus(playerId: string, status: string): Promise<void> {
+    // Only the latest subscription is the player's current one. Updating every row for the
+    // player would re-activate old subscriptions that renewal marked 'cancelled'.
+    const [latest] = await db.select({ id: subscriptions.id }).from(subscriptions)
+      .where(eq(subscriptions.playerId, playerId))
+      .orderBy(desc(subscriptions.createdAt))
+      .limit(1);
+    if (!latest) return;
     await db.update(subscriptions)
       .set({ status: status as any, updatedAt: new Date() })
-      .where(eq(subscriptions.playerId, playerId));
+      .where(eq(subscriptions.id, latest.id));
   }
 
   async renewPlayerSubscription(playerId: string, renewalData: Partial<typeof players.$inferInsert>, subscriptionData: Omit<InsertSubscription, 'playerId'>, paymentData?: Omit<InsertPayment, 'playerId'>): Promise<Player> {
@@ -632,6 +640,58 @@ export class DatabaseStorage implements IStorage {
       receiptNumber,
       paymentStatus: derivedStatus,
     } as any);
+    const [payment] = await db.select().from(payments).where(eq(payments.id, id));
+    return payment;
+  }
+
+  /**
+   * Record a payment against the player's current subscription.
+   * All amounts are computed server-side (never trusted from the client) and the player row is
+   * locked for the duration so two concurrent/double-clicked payments cannot both pass the
+   * "does not exceed what is owed" check.
+   */
+  async recordPlayerPayment(playerId: string, amountPaid: number, paymentMethod: string, description: string | null): Promise<Payment> {
+    const id = nanoid();
+    await db.transaction(async (tx) => {
+      const [lockedPlayers] = await tx.execute(sql`SELECT id, discount_percentage FROM players WHERE id = ${playerId} FOR UPDATE`) as any;
+      const player = (lockedPlayers as any[])[0];
+      if (!player) throw new Error('Player not found');
+
+      const [sub] = await tx.select().from(subscriptions)
+        .where(eq(subscriptions.playerId, playerId))
+        .orderBy(desc(subscriptions.createdAt))
+        .limit(1);
+      if (!sub) throw new Error('Player has no subscription to pay for');
+
+      const feeCents = toCents(computeFinalPrice(sub.price, player.discount_percentage));
+      const current = await tx.select().from(payments).where(eq(payments.playerId, playerId));
+      // Net paid so far on the current period = amounts paid minus anything already refunded
+      const paidSoFarCents = current.reduce((s, p) => s + toCents(p.amountPaid) - toCents(p.totalRefunded ?? '0'), 0);
+      const amountCents = toCents(amountPaid);
+
+      if (amountCents <= 0) throw new Error('Amount paid must be greater than zero');
+      if (paidSoFarCents + amountCents > feeCents) {
+        throw new Error(`Payment amount exceeds subscription fee. Maximum payment allowed: AED ${fromCents(Math.max(0, feeCents - paidSoFarCents))}`);
+      }
+
+      const remainingCents = feeCents - paidSoFarCents - amountCents;
+      await tx.insert(payments).values({
+        id,
+        playerId,
+        subscriptionFee: fromCents(feeCents),
+        amountPaid: fromCents(amountCents),
+        remainingBalance: fromCents(remainingCents),
+        paymentMethod: paymentMethod as any,
+        paymentStatus: remainingCents <= 0 ? 'completed' : 'pending',
+        description,
+        receiptNumber: `E1-${new Date().getFullYear()}-${Date.now()}-${nanoid(4)}`,
+      } as any);
+
+      // A payment re-activates only the player's CURRENT subscription (never older, cancelled ones)
+      if (sub.status !== 'active' && sub.status !== 'cancelled' && sub.endDate > new Date()) {
+        await tx.update(subscriptions).set({ status: 'active', updatedAt: new Date() }).where(eq(subscriptions.id, sub.id));
+      }
+    });
     const [payment] = await db.select().from(payments).where(eq(payments.id, id));
     return payment;
   }
@@ -997,11 +1057,18 @@ export class DatabaseStorage implements IStorage {
     const activeSubscriptions = activeSubscriptionsResult[0].count;
 
     // ── Pending Player Payments (outstanding debt) ────────────────────────────
-    const pendingPaymentsResult = await db
-      .select({ total: sql<string>`COALESCE(CAST(SUM(${payments.remainingBalance}) AS CHAR), '0')` })
-      .from(payments)
-      .where(sql`${payments.remainingBalance} > 0`);
-    const pendingPayments = pendingPaymentsResult[0].total || '0';
+    // Each payment row stores the balance remaining AFTER that payment, so only the player's
+    // latest payment row reflects what they still owe (summing all rows double counts).
+    const [pendingRows] = await db.execute(sql`
+      SELECT COALESCE(CAST(SUM(p.remaining_balance) AS CHAR), '0') AS total
+      FROM payments p
+      WHERE p.remaining_balance > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM payments p2
+          WHERE p2.player_id = p.player_id
+            AND (p2.created_at > p.created_at OR (p2.created_at = p.created_at AND p2.id > p.id))
+        )`) as any;
+    const pendingPayments = (pendingRows as any[])[0]?.total || '0';
 
     // ── Player Activity Breakdown ─────────────────────────────────────────────
     const playersByActivityResult = await db
@@ -1016,11 +1083,8 @@ export class DatabaseStorage implements IStorage {
     // Excluded: CarryForward, NetPayable, PendingAdvances — these are ledger states, not cash.
 
     // (1) Monthly player payments (gross)
-    const monthlyPlayerRevenueResult = await db
-      .select({ total: sql<string>`COALESCE(CAST(SUM(${payments.amountPaid}) AS CHAR), '0')` })
-      .from(payments)
-      .where(and(gte(payments.paymentDate, monthStart), lt(payments.paymentDate, monthEnd)));
-    const monthlyPlayerRevenue = monthlyPlayerRevenueResult[0].total || '0';
+    // Renewal moves a player's payments into payment_history, so both tables are cash received.
+    const monthlyPlayerRevenue = (await this.sumPlayerPayments(monthStart, monthEnd)).toFixed(2);
 
     // (2) Monthly advance repayments (advances the trainer paid BACK in cash this month)
     //     Status = 'repaid', deductedAt is used as the repayment timestamp
@@ -1035,11 +1099,7 @@ export class DatabaseStorage implements IStorage {
     const monthlyAdvanceRepayments = monthlyAdvanceRepaymentsResult[0].total || '0';
 
     // (3) Monthly refunds issued — these reduce net income (cash left the academy)
-    const monthlyRefundsResult = await db
-      .select({ total: sql<string>`COALESCE(CAST(SUM(${paymentRefunds.refundAmount}) AS CHAR), '0')` })
-      .from(paymentRefunds)
-      .where(and(gte(paymentRefunds.refundDate, monthStart), lt(paymentRefunds.refundDate, monthEnd)));
-    const monthlyRefunds = monthlyRefundsResult[0].total || '0';
+    const monthlyRefunds = (await this.sumRefunds(monthStart, monthEnd)).toFixed(2);
 
     const monthlyIncomeNum =
       parseFloat(monthlyPlayerRevenue) +
@@ -1101,11 +1161,7 @@ export class DatabaseStorage implements IStorage {
 
     // ── ANNUAL CASH FLOW ──────────────────────────────────────────────────────
     // Annual Income: player payments YTD + advance repayments YTD - refunds YTD
-    const annualPlayerRevenueResult = await db
-      .select({ total: sql<string>`COALESCE(CAST(SUM(${payments.amountPaid}) AS CHAR), '0')` })
-      .from(payments)
-      .where(gte(payments.paymentDate, yearStart));
-    const annualPlayerRevenue = parseFloat(annualPlayerRevenueResult[0].total || '0');
+    const annualPlayerRevenue = await this.sumPlayerPayments(yearStart, new Date(currentYear + 1, 0, 1));
 
     const annualAdvanceRepaymentsResult = await db
       .select({ total: sql<string>`COALESCE(CAST(SUM(${trainerAdvances.amount}) AS CHAR), '0')` })
@@ -1117,11 +1173,7 @@ export class DatabaseStorage implements IStorage {
     const annualAdvanceRepayments = parseFloat(annualAdvanceRepaymentsResult[0].total || '0');
 
     // Annual refunds YTD
-    const annualRefundsResult = await db
-      .select({ total: sql<string>`COALESCE(CAST(SUM(${paymentRefunds.refundAmount}) AS CHAR), '0')` })
-      .from(paymentRefunds)
-      .where(gte(paymentRefunds.refundDate, yearStart));
-    const annualRefunds = parseFloat(annualRefundsResult[0].total || '0');
+    const annualRefunds = await this.sumRefunds(yearStart, new Date(currentYear + 1, 0, 1));
 
     const annualIncomeNum = annualPlayerRevenue + annualAdvanceRepayments - annualRefunds;
 
@@ -1195,6 +1247,21 @@ export class DatabaseStorage implements IStorage {
     }
     const pendingAdvMap = Object.fromEntries(allPendingAdvRows.map(a => [a.trainerId, parseFloat(a.total || '0')]));
 
+    // Deducted advances settle the salary month of the payment they were deducted from (see getTrainerLedger)
+    const allDeductedRows = await db.select({
+      trainerId: trainerAdvances.trainerId,
+      amount: trainerAdvances.amount,
+      month: trainerSalaryPayments.month,
+    })
+      .from(trainerAdvances)
+      .innerJoin(trainerSalaryPayments, eq(trainerAdvances.salaryPaymentId, trainerSalaryPayments.id))
+      .where(eq(trainerAdvances.status, 'deducted'));
+    for (const d of allDeductedRows) {
+      const m = paidByTM.get(d.trainerId) ?? new Map<string, number>();
+      m.set(d.month, (m.get(d.month) || 0) + parseFloat(d.amount || '0'));
+      paidByTM.set(d.trainerId, m);
+    }
+
     const [curY, curM] = currentMonthStr.split('-').map(Number);
 
     let outstandingSalariesNum = 0;
@@ -1227,14 +1294,15 @@ export class DatabaseStorage implements IStorage {
     const outstandingSalaries = outstandingSalariesNum.toFixed(2);
 
     // ── PAYMENT METHOD BREAKDOWN (monthly) ───────────────────────────────────
-    const methodBreakdownResult = await db
-      .select({
-        method: payments.paymentMethod,
-        total: sql<string>`COALESCE(CAST(SUM(${payments.amountPaid}) AS CHAR), '0')`,
-      })
-      .from(payments)
-      .where(and(gte(payments.paymentDate, monthStart), lt(payments.paymentDate, monthEnd)))
-      .groupBy(payments.paymentMethod);
+    const [methodRows] = await db.execute(sql`
+      SELECT method, CAST(SUM(amount) AS CHAR) AS total FROM (
+        SELECT payment_method AS method, amount_paid AS amount FROM payments
+          WHERE payment_date >= ${monthStart} AND payment_date < ${monthEnd}
+        UNION ALL
+        SELECT payment_method AS method, amount_paid AS amount FROM payment_history
+          WHERE payment_date >= ${monthStart} AND payment_date < ${monthEnd}
+      ) t GROUP BY method`) as any;
+    const methodBreakdownResult = (methodRows as any[]).map(r => ({ method: r.method as string, total: r.total as string }));
 
     const paymentMethodBreakdown: Record<string, number> = { cash: 0, visa: 0, bank_transfer: 0 };
     let methodTotal = 0;
@@ -1247,17 +1315,22 @@ export class DatabaseStorage implements IStorage {
     // ── OVERDUE BALANCE ───────────────────────────────────────────────────────
     // Overdue = player has unpaid balance AND their subscription is expired/cancelled.
     // We derive this dynamically (paymentStatus='overdue' is never set by any job).
-    const overduePaymentsResult = await db
-      .select({ total: sql<string>`COALESCE(CAST(SUM(${payments.remainingBalance}) AS CHAR), '0')` })
-      .from(payments)
-      .leftJoin(subscriptions, eq(payments.playerId, subscriptions.playerId))
-      .where(
-        and(
-          sql`${payments.remainingBalance} > 0`,
-          sql`${subscriptions.status} IN ('expired', 'cancelled')`
+    // Latest payment row per player (current balance) whose CURRENT (latest) subscription has ended.
+    const [overdueRows] = await db.execute(sql`
+      SELECT COALESCE(CAST(SUM(p.remaining_balance) AS CHAR), '0') AS total
+      FROM payments p
+      WHERE p.remaining_balance > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM payments p2
+          WHERE p2.player_id = p.player_id
+            AND (p2.created_at > p.created_at OR (p2.created_at = p.created_at AND p2.id > p.id))
         )
-      );
-    const overduePayments = overduePaymentsResult[0].total || '0';
+        AND (
+          SELECT s.status FROM subscriptions s
+          WHERE s.player_id = p.player_id
+          ORDER BY s.created_at DESC LIMIT 1
+        ) IN ('expired', 'cancelled')`) as any;
+    const overduePayments = (overdueRows as any[])[0]?.total || '0';
 
     // ── INVENTORY STATS ───────────────────────────────────────────────────────
     // Exclude soft-deleted items; include all non-deleted regardless of status
@@ -1321,6 +1394,24 @@ export class DatabaseStorage implements IStorage {
       totalSalaryExpenses: monthlyTrainerCashPayments,
       totalBonuses,
     };
+  }
+
+  /** Player cash received in [from, to): current payments + payments archived by renewal. */
+  private async sumPlayerPayments(from: Date, to: Date): Promise<number> {
+    const [rows] = await db.execute(sql`
+      SELECT
+        (SELECT COALESCE(SUM(amount_paid), 0) FROM payments WHERE payment_date >= ${from} AND payment_date < ${to}) +
+        (SELECT COALESCE(SUM(amount_paid), 0) FROM payment_history WHERE payment_date >= ${from} AND payment_date < ${to}) AS total`) as any;
+    return parseFloat((rows as any[])[0]?.total ?? '0') || 0;
+  }
+
+  /** Refunds issued in [from, to): current refunds + refunds archived by renewal. */
+  private async sumRefunds(from: Date, to: Date): Promise<number> {
+    const [rows] = await db.execute(sql`
+      SELECT
+        (SELECT COALESCE(SUM(refund_amount), 0) FROM payment_refunds WHERE refund_date >= ${from} AND refund_date < ${to}) +
+        (SELECT COALESCE(SUM(refund_amount), 0) FROM payment_refund_history WHERE refund_date >= ${from} AND refund_date < ${to}) AS total`) as any;
+    return parseFloat((rows as any[])[0]?.total ?? '0') || 0;
   }
 
   async getUpcomingRenewals(): Promise<Array<Player & { sessionsLeft: number }>> {
@@ -1575,49 +1666,58 @@ export class DatabaseStorage implements IStorage {
     insertPayment: InsertTrainerSalaryPayment,
     advanceIdsToDeduct: string[] = []
   ): Promise<TrainerSalaryPayment> {
-    // Block if month is locked
-    const payroll = await this.getTrainerPayroll(insertPayment.trainerId, insertPayment.month);
-    if (payroll?.isLocked) {
-      throw new Error(`Month ${insertPayment.month} is locked for this trainer.`);
-    }
-
-    // Validate: cash amount must not exceed current net payable
-    // netPayable = BaseSalary + CarryForward + Bonuses - PendingAdvances - CashPayments
-    const ledgerBefore = await this.getTrainerLedger(insertPayment.trainerId, insertPayment.month);
-    const cashAmount = parseFloat(insertPayment.amount);
-
-    if (cashAmount > parseFloat(ledgerBefore.netPayable) + 0.01) {
-      throw new Error("Payment exceeds net payable");
-    }
-
-    // Insert the salary payment — amount = CASH ONLY (never includes advance amounts)
     const id = nanoid();
-    await db.insert(trainerSalaryPayments).values({ ...insertPayment, id } as any);
 
-    // FIFO advance deduction: process explicitly requested advance IDs first,
-    // then auto-apply remaining oldest pending advances up to the cash amount.
-    // Deducted advances only change their status; they are NOT added to the cash amount.
-    const allPendingAdvances = await db
-      .select()
-      .from(trainerAdvances)
-      .where(and(eq(trainerAdvances.trainerId, insertPayment.trainerId), eq(trainerAdvances.status, 'pending')))
-      .orderBy(asc(trainerAdvances.createdAt));
+    // Everything runs in one transaction holding a lock on the trainer row, so two
+    // simultaneous (or double-clicked) payments are processed one after the other and the
+    // second one sees the first when it checks "does not exceed net payable".
+    await db.transaction(async (tx) => {
+      const [lockedRows] = await tx.execute(sql`SELECT id FROM trainers WHERE id = ${insertPayment.trainerId} FOR UPDATE`) as any;
+      if (!(lockedRows as any[])[0]) throw new Error('Trainer not found');
 
-    // Determine which advances to deduct (explicit list from caller takes priority, then FIFO auto)
-    const toDeduct = advanceIdsToDeduct.length > 0
-      ? allPendingAdvances.filter(a => advanceIdsToDeduct.includes(a.id))
-      : allPendingAdvances; // auto-FIFO: deduct oldest first
+      // Block if month is locked
+      const [payroll] = await tx.select().from(trainerPayrolls)
+        .where(and(eq(trainerPayrolls.trainerId, insertPayment.trainerId), eq(trainerPayrolls.month, insertPayment.month)));
+      if (payroll?.isLocked) {
+        throw new Error(`Month ${insertPayment.month} is locked for this trainer.`);
+      }
 
-    for (const advance of toDeduct) {
-      await db
-        .update(trainerAdvances)
-        .set({
-          status: 'deducted' as any,
-          deductedAt: new Date(),
-          salaryPaymentId: id,
-        })
-        .where(and(eq(trainerAdvances.id, advance.id), eq(trainerAdvances.status, 'pending')));
-    }
+      // Validate: cash amount must not exceed current net payable
+      const ledgerBefore = await this.getTrainerLedger(insertPayment.trainerId, insertPayment.month);
+      const cashAmount = parseFloat(insertPayment.amount);
+      if (!Number.isFinite(cashAmount) || cashAmount <= 0) {
+        throw new Error("Payment amount must be greater than zero");
+      }
+      if (cashAmount > parseFloat(ledgerBefore.netPayable) + 0.01) {
+        throw new Error("Payment exceeds net payable");
+      }
+
+      // Insert the salary payment — amount = CASH ONLY (never includes advance amounts)
+      await tx.insert(trainerSalaryPayments).values({ ...insertPayment, id } as any);
+
+      // Advance deduction: explicitly requested advance IDs, otherwise all pending advances (FIFO).
+      // Deducting only changes the advance's status; it is not added to the cash amount.
+      const allPendingAdvances = await tx
+        .select()
+        .from(trainerAdvances)
+        .where(and(eq(trainerAdvances.trainerId, insertPayment.trainerId), eq(trainerAdvances.status, 'pending')))
+        .orderBy(asc(trainerAdvances.createdAt));
+
+      const toDeduct = advanceIdsToDeduct.length > 0
+        ? allPendingAdvances.filter(a => advanceIdsToDeduct.includes(a.id))
+        : allPendingAdvances;
+
+      for (const advance of toDeduct) {
+        await tx
+          .update(trainerAdvances)
+          .set({
+            status: 'deducted' as any,
+            deductedAt: new Date(),
+            salaryPaymentId: id,
+          })
+          .where(and(eq(trainerAdvances.id, advance.id), eq(trainerAdvances.status, 'pending')));
+      }
+    });
 
     const [payment] = await db.select().from(trainerSalaryPayments).where(eq(trainerSalaryPayments.id, id));
     return payment;
@@ -1782,19 +1882,30 @@ export class DatabaseStorage implements IStorage {
       if (currMonth > 12) { currMonth = 1; currYear++; }
     }
 
+    // An advance that was 'deducted' against a salary payment was cash the trainer already
+    // received, so it settles the salary month of that payment. (While 'pending' it is
+    // subtracted globally below; once deducted it must still count, or it is silently forgiven.)
+    const paymentMonthById = new Map(allPayments.map(p => [p.id, p.month]));
+    const deductedByMonth = new Map<string, number>();
+    for (const a of allAdvances) {
+      if (a.status !== 'deducted' || !a.salaryPaymentId) continue;
+      const m = paymentMonthById.get(a.salaryPaymentId);
+      if (!m) continue;
+      deductedByMonth.set(m, (deductedByMonth.get(m) || 0) + parseFloat(a.amount));
+    }
+
     let carryForward = 0;
     for (const m of pastMonths) {
       const mBonuses = allBonuses
         .filter(b => b.month === m)
         .reduce((s, b) => s + parseFloat(b.amount), 0);
 
-      // Cash paid in that month (cash only — advances never participate here)
       const mCashPaid = allPayments
         .filter(p => p.month === m)
         .reduce((s, p) => s + parseFloat(p.amount), 0);
 
-      // CarryForward = unpaid earnings only. NO advances, no deductions, no repayments.
-      carryForward += (baseSalary + mBonuses) - mCashPaid;
+      // CarryForward = unpaid earnings: earned - (cash paid + advances deducted in that month)
+      carryForward += (baseSalary + mBonuses) - mCashPaid - (deductedByMonth.get(m) || 0);
     }
 
     // ── Current Month ─────────────────────────────────────────────────────────
@@ -1818,14 +1929,11 @@ export class DatabaseStorage implements IStorage {
     // NetPayable = BaseSalary + CarryForward + Bonuses - PendingAdvances - CashPayments
     // CashPayments = SUM(trainer_salary_payments.amount) for current month
     // PendingAdvances = only status='pending' advances (global)
-    const netPayable = (baseSalary + carryForward + totalBonuses) - totalPendingAdvances - totalCashPaid;
-
-    // totalPaid exposed to UI = cash paid this month + deducted advances this month (for display)
-    const currentPaymentIds = currentPaymentsList.map(p => p.id);
-    const totalAdvancesDeductedCurrent = allAdvances
-      .filter(a => a.status === 'deducted' && a.salaryPaymentId && currentPaymentIds.includes(a.salaryPaymentId))
-      .reduce((s, a) => s + parseFloat(a.amount), 0);
+    // totalPaid exposed to UI = cash paid this month + deducted advances this month
+    const totalAdvancesDeductedCurrent = deductedByMonth.get(targetMonth) || 0;
     const totalPaid = totalCashPaid + totalAdvancesDeductedCurrent;
+
+    const netPayable = (baseSalary + carryForward + totalBonuses) - totalPendingAdvances - totalCashPaid - totalAdvancesDeductedCurrent;
 
     let status: "unpaid" | "partial" | "paid" | "over_advanced" = "unpaid";
     if (netPayable < -0.01) {

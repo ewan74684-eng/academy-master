@@ -31,9 +31,7 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
-      }
+      // Response bodies are not logged: they contain player names, phone numbers and amounts
 
       if (logLine.length > 80) {
         logLine = logLine.slice(0, 79) + "…";
@@ -50,12 +48,13 @@ app.use((req, res, next) => {
   await setupAuth(app);
   const server = await registerRoutes(app);
 
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    const status = err.status || err.statusCode || (err.name === "MulterError" ? 400 : 500);
+    // Never send internal error details (SQL, stack, paths) for server errors
+    const message = status >= 500 ? "Internal Server Error" : (err.message || "Bad Request");
+    if (status >= 500) console.error(err);
+    if (res.headersSent) return next(err);
     res.status(status).json({ message });
-    throw err;
   });
 
   // importantly only setup vite in development and after
