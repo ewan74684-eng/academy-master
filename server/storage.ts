@@ -324,7 +324,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getPlayer(id: string): Promise<Player | undefined> {
-    const [player] = await db.select().from(players).where(eq(players.id, id));
+    const [player] = await db.select().from(players).where(and(eq(players.id, id), isNull(players.deletedAt)));
     if (!player) return undefined;
 
     const [sub] = await db.select()
@@ -349,7 +349,7 @@ export class DatabaseStorage implements IStorage {
 
   async getPlayers(): Promise<Player[]> {
     await this.updateExpiredSubscriptions();
-    const allPlayers = await db.select().from(players).orderBy(desc(players.createdAt));
+    const allPlayers = await db.select().from(players).where(isNull(players.deletedAt)).orderBy(desc(players.createdAt));
     const allSubs = await db.select().from(subscriptions).orderBy(desc(subscriptions.createdAt));
 
     const latestSubMap = new Map<string, typeof subscriptions.$inferSelect>();
@@ -384,7 +384,7 @@ export class DatabaseStorage implements IStorage {
     })
       .from(subscriptions)
       .innerJoin(players, eq(players.id, subscriptions.playerId))
-      .where(and(eq(subscriptions.activity, activity as any), eq(subscriptions.status, 'active')))
+      .where(and(eq(subscriptions.activity, activity as any), eq(subscriptions.status, 'active'), isNull(players.deletedAt)))
       .orderBy(desc(subscriptions.createdAt));
 
     const uniquePlayers: any[] = [];
@@ -472,8 +472,21 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deletePlayer(id: string): Promise<boolean> {
-    const result = await db.delete(players).where(eq(players.id, id));
-    return (result[0]?.affectedRows ?? 0) > 0;
+    // Soft delete: hide the player but keep payments, refunds and history (financial records).
+    // Their subscriptions are cancelled so they drop out of active counts and renewal lists.
+    let deleted = false;
+    await db.transaction(async (tx) => {
+      const [result] = await tx.update(players)
+        .set({ deletedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(players.id, id), isNull(players.deletedAt)));
+      deleted = (result?.affectedRows ?? 0) > 0;
+      if (deleted) {
+        await tx.update(subscriptions)
+          .set({ status: 'cancelled', updatedAt: new Date() })
+          .where(and(eq(subscriptions.playerId, id), ne(subscriptions.status, 'cancelled')));
+      }
+    });
+    return deleted;
   }
 
   async updatePlayerSubscriptionStatus(playerId: string, status: string): Promise<void> {
@@ -653,7 +666,7 @@ export class DatabaseStorage implements IStorage {
   async recordPlayerPayment(playerId: string, amountPaid: number, paymentMethod: string, description: string | null): Promise<Payment> {
     const id = nanoid();
     await db.transaction(async (tx) => {
-      const [lockedPlayers] = await tx.execute(sql`SELECT id, discount_percentage FROM players WHERE id = ${playerId} FOR UPDATE`) as any;
+      const [lockedPlayers] = await tx.execute(sql`SELECT id, discount_percentage FROM players WHERE id = ${playerId} AND deleted_at IS NULL FOR UPDATE`) as any;
       const player = (lockedPlayers as any[])[0];
       if (!player) throw new Error('Player not found');
 
@@ -886,6 +899,7 @@ export class DatabaseStorage implements IStorage {
         instructorName: sessions.instructorName,
         notes: sessions.notes,
         createdAt: sessions.createdAt,
+        sessionDay: sessions.sessionDay,
         playerName: players.fullName,
         activity: subscriptions.activity,
       })
@@ -937,6 +951,28 @@ export class DatabaseStorage implements IStorage {
       return updated!;
     }
 
+    try {
+      return await this.insertSessionConsuming(session, id, consumesSession);
+    } catch (err: any) {
+      // Another request created this player's record for the same day between our check and insert
+      // (unq_player_day). Treat it like the "existing" case above instead of failing.
+      if (err?.code === 'ER_DUP_ENTRY' || err?.cause?.code === 'ER_DUP_ENTRY') {
+        const [dup] = await db.select().from(sessions)
+          .where(and(eq(sessions.playerId, (session as any).playerId), sql`DATE(${sessions.sessionDate}) = DATE(${sessionDate})`))
+          .limit(1);
+        if (dup) {
+          return (await this.updateSession(dup.id, {
+            attendanceStatus: (session as any).attendanceStatus,
+            sessionStatus: (session as any).sessionStatus,
+            notes: (session as any).notes,
+          } as any))!;
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async insertSessionConsuming(session: InsertSession, id: string, consumesSession: boolean): Promise<Session> {
     return await db.transaction(async (tx) => {
       if (consumesSession) {
         const [result] = await tx.update(subscriptions)
@@ -1047,7 +1083,7 @@ export class DatabaseStorage implements IStorage {
     const yearStart = new Date(currentYear, 0, 1);
 
     // ── Player Counts ────────────────────────────────────────────────────────
-    const totalPlayersResult = await db.select({ count: count() }).from(players);
+    const totalPlayersResult = await db.select({ count: count() }).from(players).where(isNull(players.deletedAt));
     const totalPlayers = totalPlayersResult[0].count;
 
     const activeSubscriptionsResult = await db
@@ -1063,6 +1099,7 @@ export class DatabaseStorage implements IStorage {
       SELECT COALESCE(CAST(SUM(p.remaining_balance) AS CHAR), '0') AS total
       FROM payments p
       WHERE p.remaining_balance > 0
+        AND p.player_id IN (SELECT id FROM players WHERE deleted_at IS NULL)
         AND NOT EXISTS (
           SELECT 1 FROM payments p2
           WHERE p2.player_id = p.player_id
@@ -1227,7 +1264,7 @@ export class DatabaseStorage implements IStorage {
     //   CarryForward = Σ over each past month since the trainer was created of
     //                  (BaseSalary + bonuses(m) - cashPaid(m))   [cash only, no advances]
     // Kept to O(1) queries: pull all bonuses/payments once and group in JS (no N+1).
-    const allTrainers = await db.select({ trainerId: trainers.id, salary: trainers.baseSalary, createdAt: trainers.createdAt }).from(trainers);
+    const allTrainers = await db.select({ trainerId: trainers.id, salary: trainers.baseSalary, createdAt: trainers.createdAt }).from(trainers).where(isNull(trainers.deletedAt));
     const allBonusRows = await db.select({ trainerId: trainerBonuses.trainerId, month: trainerBonuses.month, amount: trainerBonuses.amount }).from(trainerBonuses);
     const allPaymentRows = await db.select({ trainerId: trainerSalaryPayments.trainerId, month: trainerSalaryPayments.month, amount: trainerSalaryPayments.amount }).from(trainerSalaryPayments);
     const allPendingAdvRows = await db.select({ trainerId: trainerAdvances.trainerId, total: sql<string>`COALESCE(SUM(${trainerAdvances.amount}), 0)` }).from(trainerAdvances).where(eq(trainerAdvances.status, 'pending')).groupBy(trainerAdvances.trainerId);
@@ -1320,6 +1357,7 @@ export class DatabaseStorage implements IStorage {
       SELECT COALESCE(CAST(SUM(p.remaining_balance) AS CHAR), '0') AS total
       FROM payments p
       WHERE p.remaining_balance > 0
+        AND p.player_id IN (SELECT id FROM players WHERE deleted_at IS NULL)
         AND NOT EXISTS (
           SELECT 1 FROM payments p2
           WHERE p2.player_id = p.player_id
@@ -1430,7 +1468,8 @@ export class DatabaseStorage implements IStorage {
       .where(
         and(
           lte(subscriptions.endDate, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)), // Within 7 days
-          sql`${subscriptions.status} IN ('active', 'renewal_due')`
+          sql`${subscriptions.status} IN ('active', 'renewal_due')`,
+          isNull(players.deletedAt)
         )
       )
       .orderBy(asc(subscriptions.endDate));
@@ -1454,6 +1493,7 @@ export class DatabaseStorage implements IStorage {
         createdAt: players.createdAt
       })
       .from(players)
+      .where(isNull(players.deletedAt))
       .orderBy(desc(players.createdAt))
       .limit(5);
 
@@ -1505,7 +1545,7 @@ export class DatabaseStorage implements IStorage {
       })
       .from(subscriptions)
       .innerJoin(players, eq(players.id, subscriptions.playerId))
-      .where(sql`${subscriptions.status} IN ('active', 'renewal_due', 'expired')`)
+      .where(and(sql`${subscriptions.status} IN ('active', 'renewal_due', 'expired')`, isNull(players.deletedAt)))
       .orderBy(asc(subscriptions.endDate));
 
     const now = new Date();
@@ -1627,11 +1667,11 @@ export class DatabaseStorage implements IStorage {
   // ─── Trainer methods ──────────────────────────────────────────────────────
 
   async getTrainers(): Promise<Trainer[]> {
-    return await db.select().from(trainers).orderBy(desc(trainers.createdAt));
+    return await db.select().from(trainers).where(isNull(trainers.deletedAt)).orderBy(desc(trainers.createdAt));
   }
 
   async getTrainer(id: string): Promise<Trainer | undefined> {
-    const [trainer] = await db.select().from(trainers).where(eq(trainers.id, id));
+    const [trainer] = await db.select().from(trainers).where(and(eq(trainers.id, id), isNull(trainers.deletedAt)));
     return trainer || undefined;
   }
 
@@ -1643,14 +1683,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateTrainer(id: string, trainerUpdate: Partial<InsertTrainer>): Promise<Trainer | undefined> {
-    await db.update(trainers).set(trainerUpdate as any).where(eq(trainers.id, id));
-    const [trainer] = await db.select().from(trainers).where(eq(trainers.id, id));
+    await db.update(trainers).set(trainerUpdate as any).where(and(eq(trainers.id, id), isNull(trainers.deletedAt)));
+    const [trainer] = await db.select().from(trainers).where(and(eq(trainers.id, id), isNull(trainers.deletedAt)));
     return trainer || undefined;
   }
 
   async deleteTrainer(id: string): Promise<boolean> {
-    const result = await db.delete(trainers).where(eq(trainers.id, id));
-    return (result[0]?.affectedRows ?? 0) > 0;
+    // Soft delete: hide the employee but keep salary payments, advances and bonuses
+    const [result] = await db.update(trainers)
+      .set({ deletedAt: new Date() })
+      .where(and(eq(trainers.id, id), isNull(trainers.deletedAt)));
+    return (result?.affectedRows ?? 0) > 0;
   }
 
   async getTrainerSalaryPayments(trainerId?: string, month?: string): Promise<TrainerSalaryPayment[]> {
@@ -1672,7 +1715,7 @@ export class DatabaseStorage implements IStorage {
     // simultaneous (or double-clicked) payments are processed one after the other and the
     // second one sees the first when it checks "does not exceed net payable".
     await db.transaction(async (tx) => {
-      const [lockedRows] = await tx.execute(sql`SELECT id FROM trainers WHERE id = ${insertPayment.trainerId} FOR UPDATE`) as any;
+      const [lockedRows] = await tx.execute(sql`SELECT id FROM trainers WHERE id = ${insertPayment.trainerId} AND deleted_at IS NULL FOR UPDATE`) as any;
       if (!(lockedRows as any[])[0]) throw new Error('Trainer not found');
 
       // Block if month is locked

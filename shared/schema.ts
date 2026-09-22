@@ -12,6 +12,7 @@ import {
   mysqlEnum,
   unique,
   index,
+  uniqueIndex,
   customType
 } from "drizzle-orm/mysql-core";
 import { createInsertSchema } from "drizzle-zod";
@@ -112,6 +113,8 @@ export const players = mysqlTable("players", {
   specialNotes: text("special_notes"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  // Soft delete — the player is hidden but their payments/refunds/history are kept
+  deletedAt: datetime("deleted_at", { mode: 'date' }),
 });
 
 // Subscriptions table (New Architecture)
@@ -226,7 +229,11 @@ export const sessions = mysqlTable("sessions", {
   instructorName: text("instructor_name"),
   notes: text("notes"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+  // Filled by MySQL from session_date; with the unique index below, one record per player per day
+  sessionDay: date("session_day", { mode: 'date' }).generatedAlwaysAs(sql`DATE(session_date)`, { mode: "stored" }),
+}, (table) => ({
+  unqPlayerDay: uniqueIndex("unq_player_day").on(table.playerId, table.sessionDay),
+}));
 
 // Relations
 export const playersRelations = relations(players, ({ many }) => ({
@@ -312,6 +319,8 @@ export const trainers = mysqlTable("trainers", {
   activity: mysqlEnum("activity", TRAINER_ROLE_VALUES).notNull(),
   baseSalary: decimal("base_salary", { precision: 10, scale: 2 }).notNull().default('0'),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+  // Soft delete — the employee is hidden but salary/advance/bonus history is kept
+  deletedAt: datetime("deleted_at", { mode: 'date' }),
 });
 
 export const trainerSalaryPayments = mysqlTable("trainer_salary_payments", {
@@ -547,6 +556,7 @@ export const insertPlayerSchema = createInsertSchema(players).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+  deletedAt: true,
 });
 export type InsertPlayer = Omit<typeof players.$inferInsert, 'id' | 'createdAt' | 'updatedAt'>;
 
@@ -604,7 +614,7 @@ export type InsertSession = Omit<typeof sessions.$inferInsert, 'id' | 'createdAt
 
 // Trainer types
 export type Trainer = typeof trainers.$inferSelect;
-export const insertTrainerSchema = createInsertSchema(trainers).omit({ id: true, createdAt: true });
+export const insertTrainerSchema = createInsertSchema(trainers).omit({ id: true, createdAt: true, deletedAt: true });
 export type InsertTrainer = Omit<typeof trainers.$inferInsert, 'id' | 'createdAt'>;
 
 export type TrainerSalaryPayment = typeof trainerSalaryPayments.$inferSelect;

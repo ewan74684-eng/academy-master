@@ -456,26 +456,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Player not found" });
       }
 
-      // Get player documents to clean up files
-      const documents = await storage.getPlayerDocuments(id);
-      
-      // Delete the player (this should cascade delete related records)
+      // Soft delete: the player is hidden, but payments, refunds, history and documents are kept
       const deleted = await storage.deletePlayer(id);
-      
+
       if (!deleted) {
         return res.status(500).json({ message: "Failed to delete player" });
-      }
-
-      // Clean up document files from Cloudinary
-      for (const doc of documents) {
-        try {
-          const publicId = extractPublicId(doc.filePath);
-          if (publicId) {
-            await deleteFromCloudinary(publicId, doc.mimeType?.startsWith('application/pdf') ? 'raw' : 'image');
-          }
-        } catch (fileError) {
-          console.warn("Could not delete document from Cloudinary:", fileError);
-        }
       }
 
       res.json({ message: "Player deleted successfully" });
