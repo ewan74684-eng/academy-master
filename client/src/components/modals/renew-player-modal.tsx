@@ -9,6 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { format, addMonths } from "date-fns";
 import { PAYMENT_METHODS } from "@/lib/constants";
+import { addOneMonth } from "@/lib/utils";
 
 interface Props {
   open: boolean;
@@ -93,7 +94,14 @@ export default function RenewPlayerModal({ open, onOpenChange, playerId }: Props
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Start Date</Label>
-              <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+              <Input
+                type="date"
+                value={startDate}
+                onChange={(e) => {
+                  setStartDate(e.target.value);
+                  setEndDate(addOneMonth(e.target.value));
+                }}
+              />
             </div>
             <div className="space-y-1.5">
               <Label>End Date</Label>

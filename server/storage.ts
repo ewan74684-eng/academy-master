@@ -59,7 +59,7 @@ import {
   trainerAdvanceRepayments,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, asc, sql, and, gte, lte, lt, ne, count, sum, isNull } from "drizzle-orm";
+import { eq, desc, asc, sql, and, gte, lte, lt, ne, count, sum, isNull, inArray } from "drizzle-orm";
 
 // ─────────────────────────────────────────────────────────────────
 // Compute the final (discounted) subscription price the player actually owes.
@@ -338,7 +338,7 @@ export class DatabaseStorage implements IStorage {
       activity: sub?.activity || null,
       subscriptionStatus: sub?.status || 'expired',
       sessionsAttended: sub?.sessionsUsed || 0,
-      totalSessionsAllowed: sub?.sessionsAllowed || 8,
+      totalSessionsAllowed: sub?.sessionsAllowed ?? 8,
       subscriptionDate: sub?.startDate || player.createdAt,
       subscriptionEndDate: sub?.endDate || null,
       renewalDate: sub?.endDate || null,
@@ -366,7 +366,7 @@ export class DatabaseStorage implements IStorage {
         activity: sub?.activity || null,
         subscriptionStatus: sub?.status || 'expired',
         sessionsAttended: sub?.sessionsUsed || 0,
-        totalSessionsAllowed: sub?.sessionsAllowed || 8,
+        totalSessionsAllowed: sub?.sessionsAllowed ?? 8,
         subscriptionDate: sub?.startDate || player.createdAt,
         subscriptionEndDate: sub?.endDate || null,
         renewalDate: sub?.endDate || null,
@@ -384,7 +384,7 @@ export class DatabaseStorage implements IStorage {
     })
       .from(subscriptions)
       .innerJoin(players, eq(players.id, subscriptions.playerId))
-      .where(and(eq(subscriptions.activity, activity as any), eq(subscriptions.status, 'active'), isNull(players.deletedAt)))
+      .where(and(eq(subscriptions.activity, activity as any), inArray(subscriptions.status, ['active', 'renewal_due']), isNull(players.deletedAt)))
       .orderBy(desc(subscriptions.createdAt));
 
     const uniquePlayers: any[] = [];
@@ -505,7 +505,13 @@ export class DatabaseStorage implements IStorage {
   async renewPlayerSubscription(playerId: string, renewalData: Partial<typeof players.$inferInsert>, subscriptionData: Omit<InsertSubscription, 'playerId'>, paymentData?: Omit<InsertPayment, 'playerId'>): Promise<Player> {
     await db.transaction(async (tx) => {
       const currentPayments = await tx.select().from(payments).where(eq(payments.playerId, playerId));
-      
+
+      // The payments being archived belong to the subscription period that is ending now
+      const [previousSub] = await tx.select().from(subscriptions)
+        .where(eq(subscriptions.playerId, playerId))
+        .orderBy(desc(subscriptions.createdAt))
+        .limit(1);
+
       for (const payment of currentPayments) {
         const historyId = nanoid();
         await tx.insert(paymentHistory).values({
@@ -519,8 +525,8 @@ export class DatabaseStorage implements IStorage {
           paymentDate: payment.paymentDate,
           description: payment.description,
           receiptNumber: payment.receiptNumber,
-          subscriptionPeriodStart: new Date(), 
-          subscriptionPeriodEnd: new Date(), 
+          subscriptionPeriodStart: previousSub?.startDate ?? new Date(),
+          subscriptionPeriodEnd: previousSub?.endDate ?? new Date(),
           createdAt: payment.createdAt,
         });
 
@@ -700,8 +706,9 @@ export class DatabaseStorage implements IStorage {
         receiptNumber: `E1-${new Date().getFullYear()}-${Date.now()}-${nanoid(4)}`,
       } as any);
 
-      // A payment re-activates only the player's CURRENT subscription (never older, cancelled ones)
-      if (sub.status !== 'active' && sub.status !== 'cancelled' && sub.endDate > new Date()) {
+      // A payment re-activates only the player's CURRENT subscription (never older, cancelled ones).
+      // A paused subscription stays paused: paying must not silently un-pause the player.
+      if (sub.status !== 'active' && sub.status !== 'cancelled' && sub.status !== 'paused' && sub.endDate > new Date()) {
         await tx.update(subscriptions).set({ status: 'active', updatedAt: new Date() }).where(eq(subscriptions.id, sub.id));
       }
     });
@@ -1055,6 +1062,17 @@ export class DatabaseStorage implements IStorage {
         )
       );
 
+    // Back to active: a renewal_due subscription whose end date was extended beyond the 3-day window
+    await db
+      .update(subscriptions)
+      .set({ status: 'active' as any, updatedAt: new Date() })
+      .where(
+        and(
+          sql`${subscriptions.endDate} > ${threeDaysFromNow}`,
+          eq(subscriptions.status, 'renewal_due')
+        )
+      );
+
     // Mark as renewal_due: subscriptionEndDate is within 3 days and still active
     await db
       .update(subscriptions)
@@ -1089,7 +1107,7 @@ export class DatabaseStorage implements IStorage {
     const activeSubscriptionsResult = await db
       .select({ count: count() })
       .from(subscriptions)
-      .where(eq(subscriptions.status, 'active'));
+      .where(inArray(subscriptions.status, ['active', 'renewal_due']));
     const activeSubscriptions = activeSubscriptionsResult[0].count;
 
     // ── Pending Player Payments (outstanding debt) ────────────────────────────
@@ -1111,7 +1129,7 @@ export class DatabaseStorage implements IStorage {
     const playersByActivityResult = await db
       .select({ activity: subscriptions.activity, count: count() })
       .from(subscriptions)
-      .where(eq(subscriptions.status, 'active'))
+      .where(inArray(subscriptions.status, ['active', 'renewal_due']))
       .groupBy(subscriptions.activity);
 
     // ── CASH FLOW: INCOME ─────────────────────────────────────────────────────

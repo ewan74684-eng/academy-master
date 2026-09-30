@@ -37,6 +37,8 @@ import { apiRequest } from "@/lib/queryClient";
 import { ACTIVITIES } from "@/lib/constants";
 import { RefreshCw, Calendar, CreditCard } from "lucide-react";
 import DocumentManager from "@/components/ui/document-manager";
+import { PhoneInput } from "@/components/ui/phone-input";
+import { addOneMonth } from "@/lib/utils";
 
 const editPlayerSchema = z.object({
   fullName: z.string().min(1, "Full name is required"),
@@ -172,7 +174,10 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
       const updateData = {
         ...data,
         totalSessionsAllowed: parseInt(data.totalSessionsAllowed),
-        pausedDate: data.subscriptionStatus === 'paused' ? new Date() : null,
+        // Keep the original pause date when a paused player is edited; only stamp it when pausing now
+        pausedDate: data.subscriptionStatus === 'paused'
+          ? (player.subscriptionStatus === 'paused' && player.pausedDate ? player.pausedDate : new Date())
+          : null,
       };
 
       return apiRequest("PUT", `/api/players/${player.id}`, updateData);
@@ -343,7 +348,7 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
                     <FormItem>
                       <FormLabel>Phone Number</FormLabel>
                       <FormControl>
-                        <Input placeholder="+966 5XX XXX XXX" {...field} />
+                        <PhoneInput {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -414,7 +419,14 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
                     <FormItem>
                       <FormLabel>Subscription Start Date *</FormLabel>
                       <FormControl>
-                        <Input type="date" {...field} />
+                        <Input
+                          type="date"
+                          {...field}
+                          onChange={(e) => {
+                            field.onChange(e);
+                            form.setValue("subscriptionEndDate", addOneMonth(e.target.value));
+                          }}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -701,9 +713,13 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
                       <FormItem>
                         <FormLabel>Subscription Start Date *</FormLabel>
                         <FormControl>
-                          <Input 
-                            type="date" 
-                            {...field} 
+                          <Input
+                            type="date"
+                            {...field}
+                            onChange={(e) => {
+                              field.onChange(e);
+                              renewalForm.setValue("subscriptionEndDate", addOneMonth(e.target.value));
+                            }}
                           />
                         </FormControl>
                         <FormMessage />

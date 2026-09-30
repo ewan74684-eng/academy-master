@@ -30,6 +30,8 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { ACTIVITIES, SUBSCRIPTION_PLANS, PAYMENT_METHODS } from "@/lib/constants";
 import FileUpload from "@/components/ui/file-upload";
+import { PhoneInput } from "@/components/ui/phone-input";
+import { addOneMonth } from "@/lib/utils";
 
 const addPlayerSchema = z.object({
   fullName: z.string().min(1, "Full name is required"),
@@ -60,6 +62,7 @@ export default function AddPlayerModal({ open, onOpenChange }: AddPlayerModalPro
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
+  const today = new Date().toISOString().split('T')[0];
   const form = useForm<AddPlayerForm>({
     resolver: zodResolver(addPlayerSchema),
     defaultValues: {
@@ -68,8 +71,8 @@ export default function AddPlayerModal({ open, onOpenChange }: AddPlayerModalPro
       phoneNumber: "",
       email: "",
       activity: "",
-      subscriptionDate: new Date().toISOString().split('T')[0],
-      subscriptionEndDate: "",
+      subscriptionDate: today,
+      subscriptionEndDate: addOneMonth(today),
       totalSessionsAllowed: "8",
       subscriptionFee: "200",
       discountPercentage: "0",
@@ -188,7 +191,7 @@ export default function AddPlayerModal({ open, onOpenChange }: AddPlayerModalPro
                     <FormItem>
                       <FormLabel>Phone Number</FormLabel>
                       <FormControl>
-                        <Input placeholder="+966 5XX XXX XXX" {...field} />
+                        <PhoneInput {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -287,7 +290,14 @@ export default function AddPlayerModal({ open, onOpenChange }: AddPlayerModalPro
                     <FormItem>
                       <FormLabel>Subscription Start Date *</FormLabel>
                       <FormControl>
-                        <Input type="date" {...field} />
+                        <Input
+                          type="date"
+                          {...field}
+                          onChange={(e) => {
+                            field.onChange(e);
+                            form.setValue("subscriptionEndDate", addOneMonth(e.target.value));
+                          }}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

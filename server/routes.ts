@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage, ALLOWED_REFUND_METHODS } from "./storage";
 import { insertPlayerSchema, insertPaymentSchema, insertSessionSchema, subscriptions, ACTIVITY_VALUES, SUBSCRIPTION_STATUS_VALUES, PAYMENT_METHOD_VALUES, TRAINER_ROLE_VALUES, EXPENSE_CATEGORY_VALUES, ATTENDANCE_STATUS_VALUES, EXPENSE_STATUS_VALUES, INVENTORY_TRANSACTION_TYPE_VALUES } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, inArray } from "drizzle-orm";
 import { z } from "zod";
 import multer from "multer";
 import path from "path";
@@ -146,6 +146,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     { name: 'medicalForm', maxCount: 1 }
   ]), async (req, res) => {
     try {
+      // Validate before uploading anything; never guess an activity
+      const activity = parseEnum(req.body.activity, ACTIVITY_VALUES, "activity");
+
       // Parse subscription date and end date
       const subscriptionDate = new Date(req.body.subscriptionDate);
       
@@ -238,7 +241,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const subscriptionData = {
-        activity: req.body.activity || 'football',
+        activity,
         status: 'active' as const,
         startDate: subscriptionDate,
         endDate: subscriptionEndDate,
@@ -376,13 +379,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Player not found" });
       }
 
-      // Fetch the active subscription to carry forward parameters
-      const [activeSub] = await db.select().from(subscriptions)
-        .where(and(eq(subscriptions.playerId, id), eq(subscriptions.status, 'active')));
-      
-      const currentActivity = activeSub?.activity || 'football';
-      const currentTotalSessions = activeSub?.sessionsAllowed || 8;
-      const currentFee = activeSub?.price || '200';
+      // Carry forward parameters from the player's latest subscription, whatever its status.
+      // Renewals usually happen once the subscription is expired / renewal_due / paused, so
+      // filtering on status 'active' would miss it and silently reset the activity.
+      const [latestSub] = await db.select().from(subscriptions)
+        .where(eq(subscriptions.playerId, id))
+        .orderBy(desc(subscriptions.createdAt))
+        .limit(1);
+
+      const currentActivity = req.body.activity
+        ? parseEnum(req.body.activity, ACTIVITY_VALUES, "activity")
+        : latestSub?.activity;
+      if (!currentActivity) {
+        return res.status(400).json({ message: "Activity is required to renew a player with no previous subscription" });
+      }
+      const currentTotalSessions = latestSub?.sessionsAllowed ?? 8;
+      const currentFee = latestSub?.price || '200';
       
       // Use provided dates or calculate new dates
       const newSubscriptionDate = subscriptionStartDate ? parseDate(subscriptionStartDate, "subscriptionStartDate") : new Date();
@@ -395,7 +407,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Update player
       const renewalData = {};
 
-      const newSubscriptionFee = parseFloat(subscriptionFee) || parseFloat(currentFee) || 0;
+      // Only fall back to the previous fee when none was sent; an explicit 0 (free renewal) must be kept
+      const feeProvided = subscriptionFee !== undefined && subscriptionFee !== null && String(subscriptionFee).trim() !== '';
+      const newSubscriptionFee = feeProvided ? parseFloat(subscriptionFee) : (parseFloat(currentFee) || 0);
       const paymentAmount = parseFloat(amountPaid) || 0;
 
       if (isNaN(newSubscriptionFee) || newSubscriptionFee < 0) {
@@ -755,9 +769,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ message: "Subscription does not belong to this player." });
         }
       } else {
-        // Use the player's newest active subscription
+        // Use the player's newest running subscription ('renewal_due' is still running: its last 3 days)
         const [activeSub] = await db.select().from(subscriptions)
-          .where(and(eq(subscriptions.playerId, playerId), eq(subscriptions.status, 'active')))
+          .where(and(eq(subscriptions.playerId, playerId), inArray(subscriptions.status, ['active', 'renewal_due'])))
           .orderBy(desc(subscriptions.createdAt))
           .limit(1);
         if (!activeSub) {
