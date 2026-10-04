@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage, ALLOWED_REFUND_METHODS } from "./storage";
+import { storage, ALLOWED_REFUND_METHODS, computeFinalPrice } from "./storage";
 import { insertPlayerSchema, insertPaymentSchema, insertSessionSchema, subscriptions, ACTIVITY_VALUES, SUBSCRIPTION_STATUS_VALUES, PAYMENT_METHOD_VALUES, TRAINER_ROLE_VALUES, EXPENSE_CATEGORY_VALUES, ATTENDANCE_STATUS_VALUES, EXPENSE_STATUS_VALUES, INVENTORY_TRANSACTION_TYPE_VALUES } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, desc, inArray } from "drizzle-orm";
@@ -225,16 +225,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (isNaN(amountPaid) || amountPaid < 0) {
         return res.status(400).json({ message: "Amount paid cannot be negative" });
       }
-      if (amountPaid > parsedFee) {
-        return res.status(400).json({ message: "Amount paid cannot exceed subscription fee" });
+      // The player owes the price after their discount — the same figure recordPlayerPayment charges against
+      const amountDue = parseFloat(computeFinalPrice(parsedFee, playerData.discountPercentage));
+      if (amountPaid > amountDue) {
+        return res.status(400).json({ message: `Amount paid cannot exceed the subscription fee after discount (AED ${amountDue.toFixed(2)})` });
       }
 
       let paymentData: any = undefined;
-      if (parsedFee > 0 && amountPaid > 0) {
+      if (amountDue > 0 && amountPaid > 0) {
         paymentData = {
-          subscriptionFee: subscriptionFee,
-          amountPaid: amountPaid.toString(),
-          remainingBalance: (parseFloat(subscriptionFee) - amountPaid).toString(),
+          subscriptionFee: amountDue.toFixed(2),
+          amountPaid: amountPaid.toFixed(2),
+          remainingBalance: (amountDue - amountPaid).toFixed(2),
           paymentMethod: Array.isArray(req.body.paymentMethod) ? req.body.paymentMethod[0] : (req.body.paymentMethod || 'cash'),
           description: 'Initial subscription payment',
         };
@@ -418,8 +420,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (isNaN(paymentAmount) || paymentAmount < 0) {
         return res.status(400).json({ message: "Amount paid cannot be negative" });
       }
-      if (paymentAmount > newSubscriptionFee) {
-        return res.status(400).json({ message: "Amount paid cannot exceed subscription fee" });
+      // The player owes the price after their discount — the same figure recordPlayerPayment charges against
+      const amountDue = parseFloat(computeFinalPrice(newSubscriptionFee, currentPlayer.discountPercentage));
+      if (paymentAmount > amountDue) {
+        return res.status(400).json({ message: `Amount paid cannot exceed the subscription fee after discount (AED ${amountDue.toFixed(2)})` });
       }
       if (newRenewalDate <= newSubscriptionDate) {
         return res.status(400).json({ message: "Subscription end date must be after the start date" });
@@ -430,12 +434,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const renewPaymentMethod = parseEnum(paymentMethod, PAYMENT_METHOD_VALUES, "paymentMethod");
 
       let paymentData: any = undefined;
-      if (newSubscriptionFee > 0 && paymentAmount > 0) {
-        const remainingBalance = newSubscriptionFee - paymentAmount;
+      if (amountDue > 0 && paymentAmount > 0) {
         paymentData = {
-          subscriptionFee: newSubscriptionFee.toString(),
-          amountPaid: paymentAmount.toString(),
-          remainingBalance: remainingBalance.toString(),
+          subscriptionFee: amountDue.toFixed(2),
+          amountPaid: paymentAmount.toFixed(2),
+          remainingBalance: (amountDue - paymentAmount).toFixed(2),
           paymentMethod: renewPaymentMethod,
           description: description || "Payment for new subscription period",
         };
@@ -487,44 +490,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Payment routes
   app.get("/api/payments", async (req, res) => {
     try {
-      const playerId = req.query.playerId as string;
-      const startDate = req.query.startDate as string;
-      const endDate = req.query.endDate as string;
-      
-      if (playerId && playerId !== "all") {
-        // Fetch payments for specific player with date filtering
-        let payments = await storage.getPlayerPayments(playerId);
-        
-        // Apply date filtering if provided
-        if (startDate && endDate) {
-          const start = new Date(startDate);
-          const end = new Date(endDate);
-          payments = payments.filter((payment: any) => {
-            const paymentDate = new Date(payment.paymentDate);
-            return paymentDate >= start && paymentDate <= end;
-          });
-        }
-        
-        res.json(payments);
-      } else {
-        // Fetch all payments with date filtering
-        let payments = await storage.getPayments();
-        
-        // Apply date filtering if provided
-        if (startDate && endDate) {
-          const start = new Date(startDate);
-          const end = new Date(endDate);
-          payments = payments.filter((payment: any) => {
-            const paymentDate = new Date(payment.paymentDate);
-            return paymentDate >= start && paymentDate <= end;
-          });
-        }
-        
-        res.json(payments);
-      }
+      const playerId = req.query.playerId as string | undefined;
+      const startDate = req.query.startDate as string | undefined;
+      const endDate = req.query.endDate as string | undefined;
+
+      // includeArchived=true also returns payments a renewal moved to payment_history (Payments page).
+      // Without it only the current subscription period's payments are returned, which is what the
+      // payment modals use to work out how much the player has paid so far.
+      const payments = await storage.getPaymentRecords({
+        playerId: playerId && playerId !== "all" ? playerId : undefined,
+        from: startDate ? parseDate(startDate, "startDate") : undefined,
+        to: endDate ? parseDate(endDate, "endDate") : undefined,
+        includeArchived: req.query.includeArchived === "true",
+      });
+      res.json(payments);
     } catch (error) {
       console.error("Error fetching payments:", error);
-      res.status(500).json({ message: "Failed to fetch payments" });
+      const status = error instanceof ValidationError ? 400 : 500;
+      res.status(status).json({ message: safeErrorMessage(error, "Failed to fetch payments") });
+    }
+  });
+
+  // Totals for a date range (the month selected on the Payments page), including archived payments
+  app.get("/api/payments/summary", async (req, res) => {
+    try {
+      const playerId = req.query.playerId as string | undefined;
+      const summary = await storage.getPaymentSummary({
+        playerId: playerId && playerId !== "all" ? playerId : undefined,
+        from: parseDate(req.query.startDate, "startDate"),
+        to: parseDate(req.query.endDate, "endDate"),
+      });
+      res.json(summary);
+    } catch (error) {
+      console.error("Error fetching payment summary:", error);
+      const status = error instanceof ValidationError ? 400 : 500;
+      res.status(status).json({ message: safeErrorMessage(error, "Failed to fetch payment summary") });
     }
   });
 

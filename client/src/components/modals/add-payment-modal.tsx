@@ -46,9 +46,11 @@ interface AddPaymentModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   selectedPlayerId?: string;
+  /** Offered when the current subscription is already fully paid, so the payment is taken as a renewal instead */
+  onRenewPlayer?: (playerId: string) => void;
 }
 
-export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId }: AddPaymentModalProps) {
+export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId, onRenewPlayer }: AddPaymentModalProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -83,35 +85,14 @@ export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId }
   });
 
   const createPaymentMutation = useMutation({
-    mutationFn: async (data: AddPaymentForm) => {
-      // Get selected player to calculate remaining balance
-      const selectedPlayer = (players as any)?.find((p: any) => p.id === data.playerId);
-      if (!selectedPlayer) {
-        throw new Error("Player not found");
-      }
-
-      // Calculate total paid so far - playerPayments already contains payments for this player
-      const totalPaidSoFar = (playerPayments as any)?.reduce((sum: number, payment: any) => 
-        sum + parseFloat(payment.amountPaid), 0) || 0;
-      
-      const subscriptionFee = parseFloat(selectedPlayer.finalPrice ?? selectedPlayer.monthlySubscriptionFee);
-      const newPaymentAmount = parseFloat(data.amountPaid);
-      const newTotalPaid = totalPaidSoFar + newPaymentAmount;
-      const remainingBalance = Math.max(0, subscriptionFee - newTotalPaid);
-
-      // Generate receipt number
-      const receiptNumber = `RCP-${Date.now()}`;
-
-      return apiRequest("POST", "/api/payments", {
+    // The server works out the fee, balance and receipt number itself
+    mutationFn: async (data: AddPaymentForm) =>
+      apiRequest("POST", "/api/payments", {
         playerId: data.playerId,
-        subscriptionFee: subscriptionFee.toFixed(2),
         amountPaid: data.amountPaid,
-        remainingBalance: remainingBalance.toFixed(2),
         paymentMethod: data.paymentMethod,
         description: data.description || `Additional payment - ${format(new Date(), 'MMM dd, yyyy')}`,
-        receiptNumber,
-      });
-    },
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/payments"] });
       queryClient.invalidateQueries({ queryKey: ["/api/players"] });
@@ -133,15 +114,26 @@ export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId }
     },
   });
 
+  // Calculate payment summary for selected player (same rule as the server: refunded amounts don't count as paid)
+  const selectedPlayer = (players as any)?.find((p: any) => p.id === watchPlayerId);
+  const totalPaidSoFar = (playerPayments as any)?.reduce((sum: number, payment: any) =>
+    sum + parseFloat(payment.amountPaid) - parseFloat(payment.totalRefunded || '0'), 0) || 0;
+  const subscriptionFee = selectedPlayer ? parseFloat(selectedPlayer.finalPrice ?? selectedPlayer.monthlySubscriptionFee) : 0;
+  const remainingBalance = Math.max(0, Math.round((subscriptionFee - totalPaidSoFar) * 100) / 100);
+  const isFullyPaid = !!selectedPlayer && !!playerPayments && remainingBalance <= 0;
+
   const onSubmit = (data: AddPaymentForm) => {
+    const amount = parseFloat(data.amountPaid);
+    if (!(amount > 0)) {
+      form.setError("amountPaid", { message: "Amount must be greater than zero" });
+      return;
+    }
+    if (amount > remainingBalance) {
+      form.setError("amountPaid", { message: `Maximum payment allowed: AED ${remainingBalance.toFixed(2)}` });
+      return;
+    }
     createPaymentMutation.mutate(data);
   };
-
-  // Calculate payment summary for selected player
-  const selectedPlayer = (players as any)?.find((p: any) => p.id === watchPlayerId);
-  const totalPaidSoFar = (playerPayments as any)?.reduce((sum: number, payment: any) => sum + parseFloat(payment.amountPaid), 0) || 0;
-  const subscriptionFee = selectedPlayer ? parseFloat(selectedPlayer.finalPrice ?? selectedPlayer.monthlySubscriptionFee) : 0;
-  const remainingBalance = Math.max(0, subscriptionFee - totalPaidSoFar);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -199,6 +191,26 @@ export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId }
                   </div>
                 </div>
 
+                {isFullyPaid && (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    <span>This subscription is already fully paid. To take a new payment, renew the subscription.</span>
+                    {onRenewPlayer && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white shrink-0"
+                        onClick={() => {
+                          onOpenChange(false);
+                          form.reset();
+                          onRenewPlayer(selectedPlayer.id);
+                        }}
+                      >
+                        Renew Subscription
+                      </Button>
+                    )}
+                  </div>
+                )}
+
                 {/* History View */}
                 {playerPayments && (playerPayments as any[]).length > 0 && (
                   <div className="border-t border-gray-200 pt-3">
@@ -237,7 +249,6 @@ export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId }
                         type="number" 
                         step="0.01" 
                         min="0"
-                        max={remainingBalance > 0 ? remainingBalance : undefined}
                         placeholder="0.00" 
                         {...field} 
                       />
@@ -253,7 +264,7 @@ export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId }
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Payment Method *</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value}>
+                    <Select onValueChange={field.onChange} value={field.value}>
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue placeholder="Select method" />
@@ -300,7 +311,7 @@ export default function AddPaymentModal({ open, onOpenChange, selectedPlayerId }
               <Button
                 type="submit"
                 className="bg-academy-blue hover:bg-academy-blue-light text-white"
-                disabled={createPaymentMutation.isPending}
+                disabled={createPaymentMutation.isPending || isFullyPaid}
               >
                 {createPaymentMutation.isPending ? "Adding..." : "Add Payment"}
               </Button>

@@ -107,6 +107,8 @@ export default function PlayerSearchInput({
                       key={player.id}
                       type="button"
                       className="w-full px-4 py-2 text-left hover:bg-gray-100 flex items-center space-x-3"
+                      // Keep focus in the input: otherwise its blur hides this list before a slow click lands
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={() => handlePlayerSelect(player)}
                     >
                       <div className="w-8 h-8 bg-gray-300 rounded-full flex items-center justify-center">

@@ -121,6 +121,35 @@ function fromCents(cents: number): string {
   return (cents / 100).toFixed(2);
 }
 
+export type PaymentRecordFilters = { playerId?: string; from?: Date; to?: Date; includeArchived?: boolean };
+
+/** A payment row as the Payments page shows it. `archived` rows were moved to payment_history by a renewal. */
+export type PaymentRecord = {
+  id: string;
+  playerId: string;
+  playerName: string | null;
+  subscriptionFee: string;
+  amountPaid: string;
+  remainingBalance: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  paymentDate: Date;
+  receiptNumber: string;
+  description: string | null;
+  totalRefunded: string;
+  createdAt: Date;
+  archived: boolean;
+  subscriptionPeriodStart: Date | null;
+};
+
+export type PaymentSummary = {
+  totalCollected: string;
+  totalRefunded: string;
+  netCollected: string;
+  paymentCount: number;
+  byMethod: Record<string, number>;
+};
+
 
 export interface IStorage {
   // Users
@@ -149,6 +178,8 @@ export interface IStorage {
   getPayment(id: string): Promise<Payment | undefined>;
   getPayments(): Promise<Payment[]>;
   getPlayerPayments(playerId: string): Promise<Payment[]>;
+  getPaymentRecords(filters?: PaymentRecordFilters): Promise<PaymentRecord[]>;
+  getPaymentSummary(filters: PaymentRecordFilters & { from: Date; to: Date }): Promise<PaymentSummary>;
   createPayment(payment: InsertPayment): Promise<Payment>;
   recordPlayerPayment(playerId: string, amountPaid: number, paymentMethod: string, description: string | null): Promise<Payment>;
   updatePayment(id: string, payment: Partial<InsertPayment>): Promise<Payment | undefined>;
@@ -636,6 +667,111 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(payments).where(eq(payments.playerId, playerId)).orderBy(desc(payments.createdAt));
   }
 
+  /**
+   * Payment rows with the player's name, newest first. Renewal moves a player's payments into
+   * payment_history, so with includeArchived those rows are returned too (flagged `archived`);
+   * without them, renewing a player makes their earlier payments vanish from the Payments page.
+   */
+  async getPaymentRecords(filters: PaymentRecordFilters = {}): Promise<PaymentRecord[]> {
+    const { playerId, from, to, includeArchived } = filters;
+
+    const current = await db
+      .select({
+        id: payments.id,
+        playerId: payments.playerId,
+        playerName: players.fullName,
+        subscriptionFee: payments.subscriptionFee,
+        amountPaid: payments.amountPaid,
+        remainingBalance: payments.remainingBalance,
+        paymentMethod: payments.paymentMethod,
+        paymentStatus: payments.paymentStatus,
+        paymentDate: payments.paymentDate,
+        receiptNumber: payments.receiptNumber,
+        description: payments.description,
+        totalRefunded: payments.totalRefunded,
+        createdAt: payments.createdAt,
+      })
+      .from(payments)
+      .leftJoin(players, eq(payments.playerId, players.id))
+      .where(and(
+        playerId ? eq(payments.playerId, playerId) : undefined,
+        from ? gte(payments.paymentDate, from) : undefined,
+        to ? lte(payments.paymentDate, to) : undefined,
+      ));
+
+    const archived = includeArchived ? await db
+      .select({
+        id: paymentHistory.id,
+        playerId: paymentHistory.playerId,
+        playerName: players.fullName,
+        subscriptionFee: paymentHistory.subscriptionFee,
+        amountPaid: paymentHistory.amountPaid,
+        remainingBalance: paymentHistory.remainingBalance,
+        paymentMethod: paymentHistory.paymentMethod,
+        paymentStatus: paymentHistory.paymentStatus,
+        paymentDate: paymentHistory.paymentDate,
+        receiptNumber: paymentHistory.receiptNumber,
+        description: paymentHistory.description,
+        totalRefunded: sql<string>`(SELECT CAST(COALESCE(SUM(refund_amount), 0) AS CHAR) FROM payment_refund_history WHERE payment_history_id = ${paymentHistory.id})`,
+        createdAt: paymentHistory.createdAt,
+        subscriptionPeriodStart: paymentHistory.subscriptionPeriodStart,
+      })
+      .from(paymentHistory)
+      .leftJoin(players, eq(paymentHistory.playerId, players.id))
+      .where(and(
+        playerId ? eq(paymentHistory.playerId, playerId) : undefined,
+        from ? gte(paymentHistory.paymentDate, from) : undefined,
+        to ? lte(paymentHistory.paymentDate, to) : undefined,
+      )) : [];
+
+    const records: PaymentRecord[] = [
+      ...current.map(p => ({ ...p, archived: false, subscriptionPeriodStart: null })),
+      ...archived.map(p => ({ ...p, archived: true })),
+    ];
+    return records.sort((a, b) =>
+      b.paymentDate.getTime() - a.paymentDate.getTime() || b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  /** Cash collected in [from, to] (current + archived payments), refunds issued in that range, and the split by method. */
+  async getPaymentSummary(filters: PaymentRecordFilters & { from: Date; to: Date }): Promise<PaymentSummary> {
+    const { playerId, from, to } = filters;
+    const records = await this.getPaymentRecords({ playerId, from, to, includeArchived: true });
+
+    const methodCents: Record<string, number> = { cash: 0, visa: 0, bank_transfer: 0 };
+    let collectedCents = 0;
+    for (const r of records) {
+      const cents = toCents(r.amountPaid);
+      collectedCents += cents;
+      methodCents[r.paymentMethod] = (methodCents[r.paymentMethod] || 0) + cents;
+    }
+
+    const [currentRefunds] = await db
+      .select({ total: sql<string>`CAST(COALESCE(SUM(${paymentRefunds.refundAmount}), 0) AS CHAR)` })
+      .from(paymentRefunds)
+      .where(and(
+        gte(paymentRefunds.refundDate, from),
+        lte(paymentRefunds.refundDate, to),
+        playerId ? eq(paymentRefunds.playerId, playerId) : undefined,
+      ));
+    const [archivedRefunds] = await db
+      .select({ total: sql<string>`CAST(COALESCE(SUM(${paymentRefundHistory.refundAmount}), 0) AS CHAR)` })
+      .from(paymentRefundHistory)
+      .where(and(
+        gte(paymentRefundHistory.refundDate, from),
+        lte(paymentRefundHistory.refundDate, to),
+        playerId ? eq(paymentRefundHistory.playerId, playerId) : undefined,
+      ));
+    const refundedCents = toCents(currentRefunds?.total ?? '0') + toCents(archivedRefunds?.total ?? '0');
+
+    return {
+      totalCollected: fromCents(collectedCents),
+      totalRefunded: fromCents(refundedCents),
+      netCollected: fromCents(collectedCents - refundedCents),
+      paymentCount: records.length,
+      byMethod: Object.fromEntries(Object.entries(methodCents).map(([m, c]) => [m, c / 100])),
+    };
+  }
+
   async createPayment(insertPayment: InsertPayment): Promise<Payment> {
     const id = nanoid();
     const receiptNumber = `E1-${new Date().getFullYear()}-${Date.now()}`;
@@ -871,11 +1007,30 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getPaymentRefunds(paymentId: string): Promise<PaymentRefund[]> {
-    return await db
+    const current = await db
       .select()
       .from(paymentRefunds)
       .where(eq(paymentRefunds.paymentId, paymentId))
       .orderBy(desc(paymentRefunds.createdAt));
+    if (current.length > 0) return current;
+
+    // A payment archived by renewal keeps its refunds in payment_refund_history (so its receipt still shows them)
+    const archived = await db
+      .select()
+      .from(paymentRefundHistory)
+      .where(eq(paymentRefundHistory.paymentHistoryId, paymentId))
+      .orderBy(desc(paymentRefundHistory.createdAt));
+    return archived.map(r => ({
+      id: r.id,
+      paymentId,
+      playerId: r.playerId,
+      refundAmount: r.refundAmount,
+      refundMethod: r.refundMethod,
+      reason: r.reason,
+      refundedBy: r.refundedBy,
+      refundDate: r.refundDate,
+      createdAt: r.createdAt,
+    }));
   }
 
   async getPlayerRefunds(playerId: string): Promise<PaymentRefund[]> {

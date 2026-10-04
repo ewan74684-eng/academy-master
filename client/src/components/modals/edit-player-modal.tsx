@@ -34,7 +34,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
-import { ACTIVITIES } from "@/lib/constants";
+import { ACTIVITIES, PAYMENT_METHODS } from "@/lib/constants";
 import { RefreshCw, Calendar, CreditCard } from "lucide-react";
 import DocumentManager from "@/components/ui/document-manager";
 import { PhoneInput } from "@/components/ui/phone-input";
@@ -216,6 +216,7 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
       queryClient.invalidateQueries({ queryKey: ["/api/players"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/payments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/payments/history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/renewal-notifications"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/upcoming-renewals"] });
       toast({
@@ -249,6 +250,9 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
   if (!player) return null;
 
   const remainingSessions = (player.totalSessionsAllowed || 8) - (player.sessionsAttended || 0);
+  // The server charges the renewal at the fee after the player's discount
+  const renewalDiscount = Math.min(100, Math.max(0, parseFloat(player.discountPercentage || "0") || 0));
+  const renewalAmountDue = Math.max(0, (parseFloat(renewalForm.watch('subscriptionFee') || "0") || 0) * (1 - renewalDiscount / 100));
   const activity = player.activity ? ACTIVITIES[player.activity as keyof typeof ACTIVITIES] : null;
 
   return (
@@ -779,11 +783,11 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="cash">Cash</SelectItem>
-                            <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
-                            <SelectItem value="credit_card">Credit Card</SelectItem>
-                            <SelectItem value="stc_pay">STC Pay</SelectItem>
-                            <SelectItem value="apple_pay">Apple Pay</SelectItem>
+                            {Object.entries(PAYMENT_METHODS).map(([key, method]) => (
+                              <SelectItem key={key} value={key}>
+                                {method.icon} {method.label}
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                         <FormMessage />
@@ -840,6 +844,12 @@ export default function EditPlayerModal({ open, onOpenChange, player, defaultTab
                       <span>New subscription fee:</span>
                       <span>AED {renewalForm.watch('subscriptionFee') || player.monthlySubscriptionFee}</span>
                     </div>
+                    {renewalDiscount > 0 && (
+                      <div className="flex justify-between font-medium">
+                        <span>Amount due after {renewalDiscount}% discount:</span>
+                        <span>AED {renewalAmountDue.toFixed(2)}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
