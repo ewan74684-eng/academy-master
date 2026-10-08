@@ -2,6 +2,9 @@ import { ACTIVITY_DISPLAY } from "@shared/schema";
 
 export const ACTIVITIES = ACTIVITY_DISPLAY;
 
+// Terms printed on every customer subscription receipt (on-screen/printed copy and PDF)
+export const RECEIPT_NOTICE = "Notice: No refunds. Memberships may be transferred, frozen, or switched.";
+
 export const PAYMENT_METHODS = {
   cash: { icon: "💵", label: "Cash" },
   visa: { icon: "💳", label: "Visa" },

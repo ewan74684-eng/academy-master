@@ -9,6 +9,7 @@ import { User as SelectUser, users } from "@shared/schema";
 import { db } from "./db";
 import { eq } from "drizzle-orm";
 import createMemoryStore from "memorystore";
+import { lockProtectedArea } from "./protected-area";
 
 const MemoryStore = createMemoryStore(session);
 
@@ -131,6 +132,7 @@ export async function setupAuth(app: Express) {
   });
 
   app.post("/api/logout", (req, res, next) => {
+    lockProtectedArea(req);
     req.logout((err) => {
       if (err) return next(err);
       res.json({ message: "Logged out successfully" });

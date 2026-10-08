@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { format, addMonths } from "date-fns";
-import { PAYMENT_METHODS } from "@/lib/constants";
+import { ACTIVITIES, PAYMENT_METHODS } from "@/lib/constants";
 import { addOneMonth } from "@/lib/utils";
 
 interface Props {
@@ -88,7 +88,7 @@ export default function RenewPlayerModal({ open, onOpenChange, playerId }: Props
           <DialogTitle>Renew Subscription</DialogTitle>
           {player && (
             <p className="text-sm text-muted-foreground mt-1">
-              <strong>{player.fullName}</strong> · {player.activity}
+              <strong>{player.fullName}</strong> · {ACTIVITIES[player.activity as keyof typeof ACTIVITIES]?.label ?? player.activity}
             </p>
           )}
         </DialogHeader>

@@ -14,12 +14,18 @@ import AddPlayerModal from "@/components/modals/add-player-modal";
 import { ACTIVITIES } from "@/lib/constants";
 import { useQuery } from "@tanstack/react-query";
 import { generateAllPlayersPDF } from "@/lib/pdf-generator";
+import { PROTECTED_ACTIVITY } from "@shared/schema";
+import { useProtectedArea } from "@/hooks/use-protected-area";
+import { HiddenProtectedNotice, LockedSpecialNeedsPanel } from "@/components/protected-area";
 
 export default function Players() {
   const [showAddPlayer, setShowAddPlayer] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedActivity, setSelectedActivity] = useState("");
   const [isPrinting, setIsPrinting] = useState(false);
+  const { isUnlocked } = useProtectedArea();
+  // While locked the server leaves Special Needs players out of the list
+  const specialNeedsSelected = selectedActivity === PROTECTED_ACTIVITY;
 
   const { data: allPlayers } = useQuery({ queryKey: ["/api/players"] });
 
@@ -88,6 +94,7 @@ export default function Players() {
                     {Object.entries(ACTIVITIES).map(([key, activity]) => (
                       <SelectItem key={key} value={key}>
                         {activity.emoji} {activity.label}
+                        {key === PROTECTED_ACTIVITY && !isUnlocked && " 🔒"}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -96,7 +103,16 @@ export default function Players() {
             </div>
           </div>
 
-          <PlayersTable searchTerm={searchTerm} activityFilter={selectedActivity} />
+          {!isUnlocked && specialNeedsSelected ? (
+            <LockedSpecialNeedsPanel />
+          ) : (
+            <>
+              {!isUnlocked && (!selectedActivity || selectedActivity === "all") && (
+                <HiddenProtectedNotice message="Special Needs players are hidden until the password is entered." />
+              )}
+              <PlayersTable searchTerm={searchTerm} activityFilter={selectedActivity} />
+            </>
+          )}
         </div>
       </main>
 

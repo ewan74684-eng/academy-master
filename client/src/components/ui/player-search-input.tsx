@@ -28,11 +28,17 @@ export default function PlayerSearchInput({
   const [searchTerm, setSearchTerm] = useState("");
   const [showResults, setShowResults] = useState(false);
 
+  const activityText = (activity: string) => {
+    const display = ACTIVITIES[activity as keyof typeof ACTIVITIES];
+    return display ? `${display.emoji} ${display.label}` : `- ${activity || 'No Activity'}`;
+  };
+
   const filteredPlayers = players.filter(player => {
     const searchLower = searchTerm.toLowerCase();
     return (
       player.fullName?.toLowerCase().includes(searchLower) ||
       player.activity?.toLowerCase().includes(searchLower) ||
+      activityText(player.activity).toLowerCase().includes(searchLower) ||
       (player.phoneNumber && player.phoneNumber.includes(searchTerm))
     );
   }).slice(0, 10); // Limit to 10 results
@@ -62,7 +68,7 @@ export default function PlayerSearchInput({
               <p className="text-sm font-medium text-gray-900">{selectedPlayer.fullName}</p>
               <div className="flex items-center space-x-2">
                 <Badge variant="outline" className="text-xs">
-                  {(selectedPlayer.activity && ACTIVITIES[selectedPlayer.activity as keyof typeof ACTIVITIES]?.emoji) || '-'} {selectedPlayer.activity || 'No Activity'}
+                  {activityText(selectedPlayer.activity)}
                 </Badge>
                 {selectedPlayer.phoneNumber && (
                   <span className="text-xs text-gray-500">{selectedPlayer.phoneNumber}</span>
@@ -118,7 +124,7 @@ export default function PlayerSearchInput({
                         <p className="text-sm font-medium text-gray-900">{player.fullName}</p>
                         <div className="flex items-center space-x-2">
                           <Badge variant="outline" className="text-xs">
-                            {(player.activity && ACTIVITIES[player.activity as keyof typeof ACTIVITIES]?.emoji) || '-'} {player.activity || 'No Activity'}
+                            {activityText(player.activity)}
                           </Badge>
                           {player.phoneNumber && (
                             <span className="text-xs text-gray-500">{player.phoneNumber}</span>

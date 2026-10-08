@@ -9,9 +9,12 @@ import {
   GraduationCap,
   X,
   Wallet,
-  Package
+  Package,
+  Lock
 } from "lucide-react";
+import { format } from "date-fns";
 import { useAuth } from "@/hooks/use-auth";
+import { useProtectedArea } from "@/hooks/use-protected-area";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 
@@ -20,8 +23,8 @@ const navigation = [
   { name: "Players", href: "/players", icon: Users },
   { name: "Payments", href: "/payments", icon: CreditCard },
   { name: "Sessions", href: "/sessions", icon: CalendarCheck },
-  { name: "Employees", href: "/trainers", icon: GraduationCap },
-  { name: "Expenses", href: "/expenses", icon: Wallet },
+  { name: "Employees", href: "/trainers", icon: GraduationCap, passwordProtected: true },
+  { name: "Expenses", href: "/expenses", icon: Wallet, passwordProtected: true },
   { name: "Inventory", href: "/inventory", icon: Package },
 ];
 
@@ -32,6 +35,7 @@ interface SidebarProps {
 export default function Sidebar({ onClose }: SidebarProps) {
   const [location] = useLocation();
   const { user, logoutMutation } = useAuth();
+  const { status: protectedArea, isUnlocked, lock } = useProtectedArea();
 
   return (
     <div className="w-64 h-full bg-white shadow-lg border-r border-gray-200 flex flex-col">
@@ -81,6 +85,9 @@ export default function Sidebar({ onClose }: SidebarProps) {
             >
               <Icon className="h-5 w-5 shrink-0" />
               <span>{item.name}</span>
+              {item.passwordProtected && !isUnlocked && (
+                <Lock className="h-3.5 w-3.5 shrink-0 !ml-auto text-gray-400" aria-label="Password protected" />
+              )}
             </Link>
           );
         })}
@@ -97,8 +104,25 @@ export default function Sidebar({ onClose }: SidebarProps) {
           </div>
           <ThemeToggle className="h-8 w-8" />
         </div>
-        <Button 
-          variant="outline" 
+        {isUnlocked && (
+          <div className="mb-3">
+            <Button
+              variant="outline"
+              className="w-full flex items-center justify-center space-x-2"
+              onClick={() => lock()}
+            >
+              <Lock className="h-4 w-4" />
+              <span>Lock protected pages</span>
+            </Button>
+            {protectedArea?.expiresAt && (
+              <p className="mt-1.5 text-xs text-gray-500 text-center">
+                Unlocked until {format(protectedArea.expiresAt, "h:mm a")}
+              </p>
+            )}
+          </div>
+        )}
+        <Button
+          variant="outline"
           className="w-full flex items-center justify-center space-x-2"
           onClick={() => logoutMutation.mutate()}
           disabled={logoutMutation.isPending}

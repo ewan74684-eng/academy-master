@@ -1,13 +1,15 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage, ALLOWED_REFUND_METHODS, computeFinalPrice } from "./storage";
-import { insertPlayerSchema, insertPaymentSchema, insertSessionSchema, subscriptions, ACTIVITY_VALUES, SUBSCRIPTION_STATUS_VALUES, PAYMENT_METHOD_VALUES, TRAINER_ROLE_VALUES, EXPENSE_CATEGORY_VALUES, ATTENDANCE_STATUS_VALUES, EXPENSE_STATUS_VALUES, INVENTORY_TRANSACTION_TYPE_VALUES } from "@shared/schema";
+import { insertPlayerSchema, insertPaymentSchema, insertSessionSchema, subscriptions, sessions as sessionsTable, ACTIVITY_VALUES, PROTECTED_ACTIVITY, SUBSCRIPTION_STATUS_VALUES, PAYMENT_METHOD_VALUES, TRAINER_ROLE_VALUES, EXPENSE_CATEGORY_VALUES, ATTENDANCE_STATUS_VALUES, EXPENSE_STATUS_VALUES, INVENTORY_TRANSACTION_TYPE_VALUES } from "@shared/schema";
 import { db } from "./db";
 import { eq, and, desc, inArray } from "drizzle-orm";
 import { z } from "zod";
 import multer from "multer";
 import path from "path";
+import type { Request, Response } from "express";
 import { requireRole } from "./auth";
+import { registerProtectedAreaRoutes, requireProtectedArea, isProtectedAreaUnlocked, sendProtectedAreaLocked, PROTECTED_AREA_HIDDEN_HEADER } from "./protected-area";
 import { uploadToCloudinary, deleteFromCloudinary, extractPublicId, getSignedDownloadUrl } from "./cloudinary";
 import { ValidationError, safeErrorMessage, parseAmount, parseNonNegativeInt, parseDate, parseMonth, parseEnum, parseText } from "./validation";
 // Rate limiting definitions moved to index.ts
@@ -57,6 +59,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     next();
   });
 
+  // ─── Protected area: Employees, Expenses and Special Needs players ─────────
+  registerProtectedAreaRoutes(app);
+  // The activity log records expense changes, so it is protected along with them
+  app.use(["/api/trainers", "/api/expenses", "/api/activity-logs"], requireProtectedArea);
+
+  // Special Needs players, and everything that belongs to them, are only served once the
+  // protected-area password has been entered. Players of other activities are not restricted.
+  const isLockedActivity = (req: Request, activity: unknown) =>
+    activity === PROTECTED_ACTIVITY && !isProtectedAreaUnlocked(req);
+
+  async function isLockedPlayer(req: Request, playerId: unknown): Promise<boolean> {
+    if (typeof playerId !== "string" || !playerId || isProtectedAreaUnlocked(req)) return false;
+    return (await storage.getPlayerActivity(playerId)) === PROTECTED_ACTIVITY;
+  }
+
+  // While locked, leaves out the rows of Special Needs players and rows tied to a Special Needs
+  // subscription, and reports how many were left out
+  async function hideLockedPlayers<T>(
+    req: Request,
+    res: Response,
+    rows: T[],
+    playerIdOf: (row: T) => string | null | undefined,
+    activityOf: (row: T) => string | null | undefined = () => undefined,
+  ): Promise<T[]> {
+    if (isProtectedAreaUnlocked(req)) return rows;
+    const lockedPlayerIds = await storage.getPlayerIdsInActivity(PROTECTED_ACTIVITY);
+    const visible = rows.filter(row => {
+      const playerId = playerIdOf(row);
+      return activityOf(row) !== PROTECTED_ACTIVITY && !(playerId && lockedPlayerIds.has(playerId));
+    });
+    if (visible.length < rows.length) res.setHeader(PROTECTED_AREA_HIDDEN_HEADER, String(rows.length - visible.length));
+    return visible;
+  }
+
   // Dashboard routes - Require Admin Role
   app.get("/api/dashboard/stats", requireRole(['admin']), async (req, res) => {
     try {
@@ -71,7 +107,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/dashboard/upcoming-renewals", async (req, res) => {
     try {
       const renewals = await storage.getUpcomingRenewals();
-      res.json(renewals);
+      res.json(await hideLockedPlayers(req, res, renewals, r => r.id, r => (r as any).activity));
     } catch (error) {
       console.error("Error fetching upcoming renewals:", error);
       res.status(500).json({ message: "Failed to fetch upcoming renewals" });
@@ -81,7 +117,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/dashboard/recent-activities", async (req, res) => {
     try {
       const activities = await storage.getRecentActivities();
-      res.json(activities);
+      res.json(await hideLockedPlayers(req, res, activities, a => a.playerId));
     } catch (error) {
       console.error("Error fetching recent activities:", error);
       res.status(500).json({ message: "Failed to fetch recent activities" });
@@ -91,7 +127,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/dashboard/renewal-notifications", async (req, res) => {
     try {
       const notifications = await storage.getRenewalNotifications();
-      res.json(notifications);
+      res.json(await hideLockedPlayers(req, res, notifications, n => n.playerId, n => n.activity));
     } catch (error) {
       console.error("Error fetching renewal notifications:", error);
       res.status(500).json({ message: "Failed to fetch renewal notifications" });
@@ -105,12 +141,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let players;
       
       if (activity && typeof activity === 'string') {
+        if (isLockedActivity(req, activity)) return sendProtectedAreaLocked(res);
         players = await storage.getPlayersByActivity(activity);
       } else {
         players = await storage.getPlayers();
       }
       
-      res.json(players);
+      res.json(await hideLockedPlayers(req, res, players, p => p.id, p => (p as any).activity));
     } catch (error) {
       console.error("Error fetching players:", error);
       res.status(500).json({ message: "Failed to fetch players" });
@@ -119,6 +156,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/players/:id", async (req, res) => {
     try {
+      if (await isLockedPlayer(req, req.params.id)) return sendProtectedAreaLocked(res);
       const player = await storage.getPlayer(req.params.id);
       if (!player) {
         return res.status(404).json({ message: "Player not found" });
@@ -148,6 +186,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       // Validate before uploading anything; never guess an activity
       const activity = parseEnum(req.body.activity, ACTIVITY_VALUES, "activity");
+      if (isLockedActivity(req, activity)) return sendProtectedAreaLocked(res);
 
       // Parse subscription date and end date
       const subscriptionDate = new Date(req.body.subscriptionDate);
@@ -263,6 +302,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.put("/api/players/:id", async (req, res) => {
     try {
+      if (await isLockedPlayer(req, req.params.id) || isLockedActivity(req, req.body.activity)) {
+        return sendProtectedAreaLocked(res);
+      }
       const currentPlayer = await storage.getPlayer(req.params.id);
       if (!currentPlayer) {
         return res.status(404).json({ message: "Player not found" });
@@ -374,6 +416,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         paymentMethod = 'cash', 
         description = 'Subscription renewal' 
       } = req.body;
+      if (await isLockedPlayer(req, id) || isLockedActivity(req, req.body.activity)) {
+        return sendProtectedAreaLocked(res);
+      }
       
       // Get current player
       const currentPlayer = await storage.getPlayer(id);
@@ -466,6 +511,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.delete("/api/players/:id", async (req, res) => {
     try {
       const { id } = req.params;
+      if (await isLockedPlayer(req, id)) return sendProtectedAreaLocked(res);
       
       // First get player to check if exists
       const player = await storage.getPlayer(id);
@@ -493,6 +539,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const playerId = req.query.playerId as string | undefined;
       const startDate = req.query.startDate as string | undefined;
       const endDate = req.query.endDate as string | undefined;
+      if (playerId && playerId !== "all" && await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
 
       // includeArchived=true also returns payments a renewal moved to payment_history (Payments page).
       // Without it only the current subscription period's payments are returned, which is what the
@@ -503,7 +550,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         to: endDate ? parseDate(endDate, "endDate") : undefined,
         includeArchived: req.query.includeArchived === "true",
       });
-      res.json(payments);
+      res.json(await hideLockedPlayers(req, res, payments, p => p.playerId));
     } catch (error) {
       console.error("Error fetching payments:", error);
       const status = error instanceof ValidationError ? 400 : 500;
@@ -515,6 +562,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/payments/summary", async (req, res) => {
     try {
       const playerId = req.query.playerId as string | undefined;
+      // The all-players totals stay complete; a single Special Needs player's totals are protected
+      if (playerId && playerId !== "all" && await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
       const summary = await storage.getPaymentSummary({
         playerId: playerId && playerId !== "all" ? playerId : undefined,
         from: parseDate(req.query.startDate, "startDate"),
@@ -531,6 +580,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/payments/history/:playerId", async (req, res) => {
     try {
       const { playerId } = req.params;
+      if (await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
       const paymentHistory = await storage.getPlayerPaymentHistory(playerId);
       res.json(paymentHistory);
     } catch (error) {
@@ -544,6 +594,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const handleRecordPayment = async (req: any, res: any) => {
     try {
       const playerId = parseText(req.body.playerId, "playerId", { required: true, max: 36 })!;
+      if (await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
       const amountPaid = parseAmount(req.body.amountPaid, "amountPaid", { allowZero: false })!;
       const paymentMethod = parseEnum(req.body.paymentMethod ?? 'cash', PAYMENT_METHOD_VALUES, "paymentMethod");
       const description = parseText(req.body.description, "description", { max: 500 }) || 'Additional subscription payment';
@@ -595,6 +646,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!payment) {
         return res.status(404).json({ message: "Payment not found" });
       }
+      if (await isLockedPlayer(req, payment.playerId)) return sendProtectedAreaLocked(res);
 
       // ── 6. Delegate to storage — playerId is derived from payment, NOT from body
       const refund = await storage.createPaymentRefund(
@@ -626,6 +678,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/payments/:paymentId/refunds", async (req, res) => {
     try {
       const { paymentId } = req.params;
+      const payment = await storage.getPayment(paymentId);
+      if (payment && await isLockedPlayer(req, payment.playerId)) return sendProtectedAreaLocked(res);
       const refunds = await storage.getPaymentRefunds(paymentId);
       const summary = await storage.getRefundSummary(paymentId);
       res.json({ refunds, summary });
@@ -638,6 +692,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/players/:playerId/refunds", async (req, res) => {
     try {
       const { playerId } = req.params;
+      if (await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
       const refunds = await storage.getPlayerRefunds(playerId);
       res.json(refunds);
     } catch (error) {
@@ -650,6 +705,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/players/:playerId/documents", upload.any(), async (req, res) => {
     try {
       const { playerId } = req.params;
+      if (await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
       const documentType = parseEnum(req.body.documentType, ['id', 'medical_form'] as const, "documentType");
       const files = req.files as Express.Multer.File[];
 
@@ -690,6 +746,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!document) {
         return res.status(404).json({ message: "Document not found" });
       }
+      if (await isLockedPlayer(req, document.playerId)) return sendProtectedAreaLocked(res);
 
       let upstream = await fetch(document.filePath);
       if (!upstream.ok) {
@@ -721,6 +778,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!document) {
         return res.status(404).json({ message: "Document not found" });
       }
+      if (await isLockedPlayer(req, document.playerId)) return sendProtectedAreaLocked(res);
 
       const deleted = await storage.deletePlayerDocument(documentId);
       
@@ -746,10 +804,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Session routes
+  async function sessionPlayerId(sessionId: string): Promise<string | undefined> {
+    const [row] = await db.select({ playerId: sessionsTable.playerId }).from(sessionsTable).where(eq(sessionsTable.id, sessionId));
+    return row?.playerId;
+  }
+
   app.get("/api/sessions", async (req, res) => {
     try {
       const sessions = await storage.getAllSessions();
-      res.json(sessions);
+      res.json(await hideLockedPlayers(req, res, sessions, s => s.playerId, s => (s as any).activity));
     } catch (error) {
       console.error("Error fetching sessions:", error);
       res.status(500).json({ message: "Failed to fetch sessions" });
@@ -759,6 +822,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/sessions", async (req, res) => {
     try {
       const playerId = parseText(req.body.playerId, "playerId", { required: true, max: 36 })!;
+      if (await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
       let subscriptionId = req.body.subscriptionId;
 
       if (subscriptionId) {
@@ -822,6 +886,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { sessionId } = req.params;
       const { status, notes } = req.body;
       parseEnum(status, ATTENDANCE_STATUS_VALUES, "status");
+      if (await isLockedPlayer(req, await sessionPlayerId(sessionId))) return sendProtectedAreaLocked(res);
       
       const session = await storage.markAttendance(sessionId, status, notes);
       if (!session) {
@@ -839,6 +904,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/sessions/player/:playerId", async (req, res) => {
     try {
       const { playerId } = req.params;
+      if (await isLockedPlayer(req, playerId)) return sendProtectedAreaLocked(res);
       const sessions = await storage.getPlayerSessions(playerId);
       res.json(sessions);
     } catch (error) {
@@ -849,6 +915,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/payments/player/:playerId", async (req, res) => {
     try {
+      if (await isLockedPlayer(req, req.params.playerId)) return sendProtectedAreaLocked(res);
       const payments = await storage.getPlayerPayments(req.params.playerId);
       res.json(payments);
     } catch (error) {
@@ -857,53 +924,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Dashboard API routes
-  app.get("/api/dashboard/renewal-notifications", async (req, res) => {
-    try {
-      const notifications = await storage.getRenewalNotifications();
-      res.json(notifications);
-    } catch (error) {
-      console.error("Error fetching renewal notifications:", error);
-      res.status(500).json({ message: "Failed to fetch renewal notifications" });
-    }
-  });
-
-  app.get("/api/dashboard/upcoming-renewals", async (req, res) => {
-    try {
-      const renewals = await storage.getUpcomingRenewals();
-      res.json(renewals);
-    } catch (error) {
-      console.error("Error fetching upcoming renewals:", error);
-      res.status(500).json({ message: "Failed to fetch upcoming renewals" });
-    }
-  });
-
-  app.get("/api/dashboard/recent-activities", async (req, res) => {
-    try {
-      const activities = await storage.getRecentActivities();
-      res.json(activities);
-    } catch (error) {
-      console.error("Error fetching recent activities:", error);
-      res.status(500).json({ message: "Failed to fetch recent activities" });
-    }
-  });
-
-  app.get("/api/dashboard/stats", async (req, res) => {
-    try {
-      const stats = await storage.getDashboardStats();
-      res.json(stats);
-    } catch (error) {
-      console.error("Error fetching dashboard stats:", error);
-      res.status(500).json({ message: "Failed to fetch dashboard stats" });
-    }
-  });
-
-
-
-
-
   app.put("/api/sessions/:id", async (req, res) => {
     try {
+      if (await isLockedPlayer(req, await sessionPlayerId(req.params.id)) || await isLockedPlayer(req, req.body.playerId)) {
+        return sendProtectedAreaLocked(res);
+      }
       const sessionData = insertSessionSchema.partial().parse(req.body);
 
       // Validate that the end time is after the start time when both are provided

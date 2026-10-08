@@ -1,8 +1,8 @@
 import jsPDF from 'jspdf';
 import type { Player, Payment } from '@shared/schema';
-import { ACTIVITIES, PAYMENT_METHODS } from './constants';
+import { ACTIVITIES, PAYMENT_METHODS, RECEIPT_NOTICE } from './constants';
 import { LOGO_BASE64 } from './logo-base64';
-import { TRAINER_ROLE_DISPLAY } from '@shared/schema';
+import { TRAINER_ROLE_DISPLAY, compareActivities } from '@shared/schema';
 
 // Shared logo header helper — draws the logo + academy name at the top of every PDF
 function drawLogoHeader(pdf: jsPDF, subtitle: string) {
@@ -149,6 +149,22 @@ export function generateReceipt(player: Player, payment: Payment, allPayments?: 
     currentY += 15;
   }
 
+  // Terms notice, boxed, with the footer kept on the same page
+  if (currentY + 30 > 287) {
+    pdf.addPage();
+    drawLogoHeader(pdf, 'Payment Receipt (continued)');
+    currentY = 46;
+  }
+  pdf.setDrawColor(55, 65, 81);
+  pdf.setLineWidth(0.4);
+  pdf.roundedRect(20, currentY, 170, 12, 2, 2);
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(10);
+  pdf.setTextColor(17, 24, 39);
+  pdf.text(RECEIPT_NOTICE, 105, currentY + 7.5, { align: 'center' });
+  pdf.setFont('helvetica', 'normal');
+  currentY += 12;
+
   // Footer
   pdf.setFontSize(9);
   pdf.setTextColor(100, 100, 100);
@@ -293,7 +309,11 @@ export function generateAllPlayersPDF(players: Player[]) {
   y += 9;
   pdf.setTextColor(0, 0, 0);
 
-  players.forEach((player, idx) => {
+  // Grouped by activity in display order (stable sort: newest first within an activity)
+  const playersByActivity = [...players].sort((a, b) =>
+    compareActivities((a as any).activity, (b as any).activity));
+
+  playersByActivity.forEach((player, idx) => {
     if (y > 190) {
       pdf.addPage();
       drawLogoHeader(pdf, 'All Players Report (continued)');

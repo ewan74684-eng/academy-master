@@ -10,6 +10,10 @@ import { getMonthRange } from "@/lib/utils";
 import ReceiptModal from "@/components/modals/receipt-modal";
 import ViewPlayerModal from "@/components/modals/view-player-modal";
 import RefundPaymentModal from "@/components/modals/refund-payment-modal";
+import { HiddenProtectedNotice } from "@/components/protected-area";
+import { hiddenProtectedCount } from "@/lib/protected-area";
+import { useOnProtectedAreaLock } from "@/hooks/use-protected-area";
+import { PROTECTED_ACTIVITY } from "@shared/schema";
 
 interface PaymentRecordsProps {
   month: string; // 'YYYY-MM'
@@ -32,7 +36,7 @@ export default function PaymentRecords({
   const [selectedPlayerPayments, setSelectedPlayerPayments] = useState<any[]>([]);
   const [viewPlayerId, setViewPlayerId] = useState<string | null>(null);
 
-  const { data: payments, isLoading, refetch } = useQuery({
+  const { data, isLoading, refetch } = useQuery({
     queryKey: ["/api/payments", "records", selectedPlayer, selectedMonth],
     queryFn: async () => {
       // includeArchived: payments a renewal moved to history still belong to the month they were paid in
@@ -40,7 +44,8 @@ export default function PaymentRecords({
       if (selectedPlayer !== "all") params.set("playerId", selectedPlayer);
       const response = await fetch(`/api/payments?${params}`);
       if (!response.ok) throw new Error('Failed to fetch payments');
-      return response.json();
+      // While the protected area is locked, Special Needs players' payments are left out
+      return { payments: await response.json(), hiddenCount: hiddenProtectedCount(response) };
     },
     staleTime: 0,
     gcTime: 0,
@@ -79,6 +84,15 @@ export default function PaymentRecords({
     setRefundModalOpen(true);
   };
 
+  // Don't leave a Special Needs player's receipt on screen once the protected area locks
+  useOnProtectedAreaLock(() => {
+    if (selectedPlayerData?.activity === PROTECTED_ACTIVITY) {
+      setReceiptModalOpen(false);
+      setSelectedPlayerData(null);
+      setSelectedPlayerPayments([]);
+    }
+  });
+
   // Force refetch when component mounts
   React.useEffect(() => {
     refetch();
@@ -101,7 +115,8 @@ export default function PaymentRecords({
   const canRefund = (payment: any) =>
     !payment.archived && payment.paymentStatus !== 'cancelled' && payment.paymentStatus !== 'refunded';
 
-  const paymentList: any[] = (payments as any[]) || [];
+  const paymentList: any[] = data?.payments || [];
+  const hiddenCount = data?.hiddenCount ?? 0;
   const monthTotal = paymentList.reduce((sum, p) => sum + parseFloat(p.amountPaid), 0);
   const monthLabel = format(parseISO(`${selectedMonth}-01`), 'MMMM yyyy');
   const formatAED = (amount: number) =>
@@ -175,6 +190,14 @@ export default function PaymentRecords({
             </div>
           </CardHeader>
           <CardContent className="p-0 sm:p-6">
+            {hiddenCount > 0 && (
+              <div className="border-t border-gray-200 sm:-mx-6 sm:-mt-6 sm:mb-4">
+                <HiddenProtectedNotice
+                  message={`${hiddenCount} payment${hiddenCount === 1 ? '' : 's'} of Special Needs players ${hiddenCount === 1 ? 'is' : 'are'} hidden until the password is entered.`}
+                />
+              </div>
+            )}
+
             {/* Mobile card list */}
             <div className="sm:hidden divide-y divide-gray-100">
               {paymentList.length === 0 && (

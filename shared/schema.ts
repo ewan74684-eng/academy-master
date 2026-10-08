@@ -34,11 +34,17 @@ export const PAYMENT_STATUS_ALL = [
 export type PaymentStatusValue = typeof PAYMENT_STATUS_ALL[number];
 
 // Enum Values
+// This is the database ENUM order (new values are appended); the display order is ACTIVITY_DISPLAY's.
 export const ACTIVITY_VALUES = [
   'karate', 'kickboxing', 'football', 'swimming', 'zumba', 'aerobics', 'crossfit', 'gymnastics', 'quran_memorization', 'kindergarten',
   // Added categories (gymnastics already existed above and is intentionally not repeated)
-  'muay_thai', 'special_needs', 'aqua_aerobics', 'basketball', 'volleyball'
+  'muay_thai', 'special_needs', 'aqua_aerobics', 'basketball', 'volleyball',
+  // Added by migrations/0004_add_gym_jiu_jitsu_judo.sql
+  'gym', 'jiu_jitsu', 'judo'
 ] as const;
+
+// Players of this activity are only shown after the protected-area password is entered
+export const PROTECTED_ACTIVITY = 'special_needs' as const;
 
 // Non-coaching staff paid through the trainers/payroll section (not offered to players)
 export const STAFF_ROLE_VALUES = ['cleaning', 'reception'] as const;
@@ -665,11 +671,15 @@ export type InsertAccountingPeriod = Omit<typeof accountingPeriods.$inferInsert,
 export type AuditLog = typeof auditLogs.$inferSelect;
 export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({ id: true, timestamp: true });
 export type InsertAuditLog = Omit<typeof auditLogs.$inferInsert, 'id' | 'timestamp'>;
+// Key order is the display order of every activity selector, filter and report:
+// Karate, Swimming, Kickboxing, Gym and Special Needs first, then all the other activities.
 export const ACTIVITY_DISPLAY = {
   karate: { emoji: '🥋', label: 'Karate' },
-  kickboxing: { emoji: '🥊', label: 'Kickboxing' },
-  football: { emoji: '⚽', label: 'Football' },
   swimming: { emoji: '🏊🏼', label: 'Swimming' },
+  kickboxing: { emoji: '🥊', label: 'Kickboxing' },
+  gym: { emoji: '💪', label: 'Gym' },
+  special_needs: { emoji: '🧩', label: 'Special Needs' },
+  football: { emoji: '⚽', label: 'Football' },
   zumba: { emoji: '💃', label: 'Zumba' },
   aerobics: { emoji: '🏋🏻‍♂️', label: 'Aerobics' },
   crossfit: { emoji: '🏋🏻‍♂️', label: 'CrossFit' },
@@ -677,11 +687,23 @@ export const ACTIVITY_DISPLAY = {
   quran_memorization: { emoji: '📖', label: 'Quran Memorization' },
   kindergarten: { emoji: '🎒', label: 'Kindergarten' },
   muay_thai: { emoji: '🥊', label: 'Muay Thai Boxing' },
-  special_needs: { emoji: '🧩', label: 'Special Needs' },
   aqua_aerobics: { emoji: '🌊', label: 'Aqua Aerobics' },
   basketball: { emoji: '🏀', label: 'Basketball' },
   volleyball: { emoji: '🏐', label: 'Volleyball' },
-} as const;
+  jiu_jitsu: { emoji: '🤼', label: 'Jiu-Jitsu' },
+  judo: { emoji: '🥋', label: 'Judo' },
+} as const satisfies Record<typeof ACTIVITY_VALUES[number], { emoji: string; label: string }>;
+
+const ACTIVITY_ORDER: readonly string[] = Object.keys(ACTIVITY_DISPLAY);
+
+/** Sort comparator for activity keys in display order; unknown keys go last. */
+export function compareActivities(a: string | null | undefined, b: string | null | undefined): number {
+  const rank = (key: string | null | undefined) => {
+    const i = key ? ACTIVITY_ORDER.indexOf(key) : -1;
+    return i === -1 ? ACTIVITY_ORDER.length : i;
+  };
+  return rank(a) - rank(b);
+}
 
 export const STAFF_ROLE_DISPLAY = {
   cleaning: { emoji: '🧹', label: 'Cleaning Worker' },

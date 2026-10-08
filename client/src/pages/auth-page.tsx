@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Loader2, ShieldCheck } from "lucide-react";
+import { ProtectedPage } from "@/components/protected-area";
 
 export function AuthPage() {
   const { user, loginMutation, isLoading } = useAuth();
@@ -120,9 +121,12 @@ function LoginForm() {
 export function ProtectedRoute({
   path,
   component: Component,
+  passwordProtectedTitle,
 }: {
   path: string;
   component: () => React.JSX.Element;
+  /** Also asks for the protected-area password before showing the page (title shown meanwhile). */
+  passwordProtectedTitle?: string;
 }) {
   const { user, isLoading } = useAuth();
 
@@ -136,6 +140,14 @@ export function ProtectedRoute({
 
   if (!user) {
     return <Redirect to="/auth" />;
+  }
+
+  if (passwordProtectedTitle) {
+    return (
+      <ProtectedPage title={passwordProtectedTitle}>
+        <Component />
+      </ProtectedPage>
+    );
   }
 
   return <Component />;

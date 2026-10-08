@@ -39,6 +39,8 @@ function useLogoutMutation() {
     },
     onSuccess: () => {
       queryClient.setQueryData(["/api/user"], null);
+      // Don't keep this session's data in memory (it may include password-protected data)
+      queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "/api/user" });
       toast({ title: "Logged out", description: "You have been logged out successfully." });
     },
     onError: (error: Error) => {

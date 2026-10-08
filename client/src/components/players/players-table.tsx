@@ -10,6 +10,8 @@ import ViewPlayerModal from "@/components/modals/view-player-modal";
 import EditPlayerModal from "@/components/modals/edit-player-modal";
 import AddPaymentModal from "@/components/modals/add-payment-modal";
 import AddAdditionalPaymentModal from "@/components/modals/add-additional-payment-modal";
+import { useOnProtectedAreaLock } from "@/hooks/use-protected-area";
+import { PROTECTED_ACTIVITY } from "@shared/schema";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,6 +41,16 @@ export default function PlayersTable({ searchTerm, activityFilter }: PlayersTabl
 
   const { data: players, isLoading } = useQuery({
     queryKey: ["/api/players"],
+  });
+
+  // Don't leave a Special Needs player's details on screen once the protected area locks
+  useOnProtectedAreaLock(() => {
+    if (selectedPlayer?.activity === PROTECTED_ACTIVITY) {
+      setShowEditModal(false);
+      setShowPaymentModal(false);
+      setShowAdditionalPaymentModal(false);
+      setSelectedPlayer(null);
+    }
   });
 
   const deletePlayerMutation = useMutation({

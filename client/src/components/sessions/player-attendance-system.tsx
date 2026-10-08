@@ -27,6 +27,9 @@ import { useToast } from "@/hooks/use-toast";
 import { ACTIVITIES } from "@/lib/constants";
 import { apiRequest } from "@/lib/queryClient";
 import MarkPlayerAttendanceModal from "@/components/modals/mark-player-attendance-modal";
+import { LockedSpecialNeedsPanel } from "@/components/protected-area";
+import { useProtectedArea, useOnProtectedAreaLock } from "@/hooks/use-protected-area";
+import { PROTECTED_ACTIVITY } from "@shared/schema";
 
 const ATTENDANCE_STATUS_COLORS = {
   present: "bg-green-100 text-green-800",
@@ -50,6 +53,15 @@ export default function PlayerAttendanceSystem() {
   const [selectedPlayer, setSelectedPlayer] = useState<any>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { isUnlocked } = useProtectedArea();
+
+  // Don't leave a Special Needs player on screen once the protected area locks
+  useOnProtectedAreaLock(() => {
+    if (selectedPlayer?.activity === PROTECTED_ACTIVITY) {
+      setShowAttendanceModal(false);
+      setSelectedPlayer(null);
+    }
+  });
 
   const { data: players, isLoading: playersLoading } = useQuery({
     queryKey: ["/api/players"],
@@ -313,12 +325,15 @@ export default function PlayerAttendanceSystem() {
             })}
           </div>
 
-          {filteredPlayers.length === 0 && (
+          {/* While locked the server leaves Special Needs players out, so ask for the password */}
+          {filteredPlayers.length === 0 && (!isUnlocked && selectedActivity === PROTECTED_ACTIVITY ? (
+            <LockedSpecialNeedsPanel />
+          ) : (
             <div className="text-center py-12">
               <Users className="h-12 w-12 text-gray-400 mx-auto mb-4" />
               <p className="text-gray-600">No players found matching your filters.</p>
             </div>
-          )}
+          ))}
         </CardContent>
       </Card>
 

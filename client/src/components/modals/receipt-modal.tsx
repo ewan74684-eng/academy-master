@@ -11,7 +11,7 @@ import { generateReceipt } from "@/lib/pdf-generator";
 import { printElementById } from "@/lib/print";
 import type { Player, Payment } from "@shared/schema";
 import { format } from "date-fns";
-import { PAYMENT_METHODS } from "@/lib/constants";
+import { PAYMENT_METHODS, RECEIPT_NOTICE } from "@/lib/constants";
 import { RotateCcw } from "lucide-react";
 
 interface ReceiptModalProps {
@@ -231,8 +231,13 @@ export default function ReceiptModal({
             </div>
           )}
 
+          {/* Terms notice — part of the printed customer copy */}
+          <div className="mt-6 px-3 py-2 border border-gray-400 rounded-lg text-center">
+            <p className="text-sm font-semibold text-gray-900">{RECEIPT_NOTICE}</p>
+          </div>
+
           {/* Footer */}
-          <div className="text-center mt-6 pt-4 border-t border-gray-200">
+          <div className="text-center mt-4 pt-4 border-t border-gray-200">
             <p className="text-xs text-gray-500">Thank you for choosing E1 Sport Champions Academy</p>
           </div>
         </div>

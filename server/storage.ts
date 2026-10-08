@@ -57,6 +57,8 @@ import {
   accountingPeriods,
   auditLogs,
   trainerAdvanceRepayments,
+  compareActivities,
+  ACTIVITY_VALUES,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, asc, sql, and, gte, lte, lt, ne, count, sum, isNull, inArray } from "drizzle-orm";
@@ -70,6 +72,26 @@ export function computeFinalPrice(price: string | number | null | undefined, dis
   const clampedDiscount = Math.min(100, Math.max(0, discount));
   const final = Math.max(0, base * (1 - clampedDiscount / 100));
   return final.toFixed(2);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Warns at startup when the database does not accept every activity yet (a migration in
+// migrations/ was not run), instead of failing later when someone picks one of them.
+export async function warnAboutMissingActivities(): Promise<void> {
+  try {
+    const [rows] = await db.execute(sql`
+      SELECT TABLE_NAME AS tableName, COLUMN_TYPE AS columnType
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'activity' AND TABLE_NAME IN ('subscriptions', 'trainers')`) as any;
+    for (const { tableName, columnType } of rows as Array<{ tableName: string; columnType: string }>) {
+      const missing = ACTIVITY_VALUES.filter(v => !String(columnType).includes(`'${v}'`));
+      if (missing.length > 0) {
+        console.warn(`WARNING: ${tableName}.activity does not accept ${missing.join(", ")} yet. Run migrations/0004_add_gym_jiu_jitsu_judo.sql (or node scripts/apply-categories.mjs).`);
+      }
+    }
+  } catch (err) {
+    console.error("Could not check the activity column:", err);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -161,6 +183,8 @@ export interface IStorage {
   getPlayer(id: string): Promise<Player | undefined>;
   getPlayers(): Promise<Player[]>;
   getPlayersByActivity(activity: string): Promise<Player[]>;
+  getPlayerActivity(playerId: string): Promise<string | null>;
+  getPlayerIdsInActivity(activity: string): Promise<Set<string>>;
   createPlayer(player: InsertPlayer): Promise<Player>;
   createPlayerWithSubscription(player: InsertPlayer, subscription: Omit<InsertSubscription, 'playerId'>, paymentData?: Omit<InsertPayment, 'playerId'>, documents?: Omit<InsertPlayerDocument, 'playerId'>[]): Promise<Player>;
   updatePlayer(id: string, player: Partial<typeof players.$inferInsert>): Promise<Player | undefined>;
@@ -438,6 +462,24 @@ export class DatabaseStorage implements IStorage {
       }
     }
     return uniquePlayers;
+  }
+
+  /** The player's current activity: the one on their latest subscription (the same one getPlayer reports). */
+  async getPlayerActivity(playerId: string): Promise<string | null> {
+    const [sub] = await db.select({ activity: subscriptions.activity })
+      .from(subscriptions)
+      .where(eq(subscriptions.playerId, playerId))
+      .orderBy(desc(subscriptions.createdAt))
+      .limit(1);
+    return sub?.activity ?? null;
+  }
+
+  /** Ids of the players (deleted ones included) whose current activity is `activity`. */
+  async getPlayerIdsInActivity(activity: string): Promise<Set<string>> {
+    const rows = await db.select({ id: players.id })
+      .from(players)
+      .where(sql`(SELECT activity FROM subscriptions WHERE player_id = ${players.id} ORDER BY created_at DESC LIMIT 1) = ${activity}`);
+    return new Set(rows.map(r => r.id));
   }
 
   async createPlayer(insertPlayer: InsertPlayer): Promise<Player> {
@@ -1281,11 +1323,12 @@ export class DatabaseStorage implements IStorage {
     const pendingPayments = (pendingRows as any[])[0]?.total || '0';
 
     // ── Player Activity Breakdown ─────────────────────────────────────────────
-    const playersByActivityResult = await db
+    const playersByActivityResult = (await db
       .select({ activity: subscriptions.activity, count: count() })
       .from(subscriptions)
       .where(inArray(subscriptions.status, ['active', 'renewal_due']))
-      .groupBy(subscriptions.activity);
+      .groupBy(subscriptions.activity))
+      .sort((a, b) => compareActivities(a.activity, b.activity));
 
     // ── CASH FLOW: INCOME ─────────────────────────────────────────────────────
     // Income = real cash entering the academy.
